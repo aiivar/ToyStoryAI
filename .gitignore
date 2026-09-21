@@ -7,6 +7,20 @@ __pycache__/
 .pytest_cache/
 .tmp/
 
+# Кэши и артефакты сборки
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Редакторы и ОС
+.DS_Store
+.idea/
+.vscode/
+
 # Рабочие артефакты MVP
 uploads/
 *.db
