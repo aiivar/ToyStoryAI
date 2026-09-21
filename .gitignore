@@ -1,0 +1,13 @@
+# Секреты и локальное состояние
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.tmp/
+
+# Рабочие артефакты MVP
+uploads/
+*.db
+*.db-journal
