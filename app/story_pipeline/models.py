@@ -113,6 +113,37 @@ class PageScene(BaseModel):
     objects_in_scene: list[str] = Field(description="Имена ключевых объектов в кадре.")
 
 
+class ScenesPayload(BaseModel):
+    """Обёртка ответа раскадровщика: список сцен.
+
+    Как и `PagesPayload`, это корневой объект ответа: `complete_json`
+    разбирает ответ в pydantic-модель, а список сцен — не корневой объект.
+    Модель живёт рядом с `PageScene`, чтобы схема ответа и её рендер были
+    в одном месте.
+    """
+
+    scenes: list[PageScene] = Field(
+        description="Сцены по одной на страницу, с номерами страниц."
+    )
+
+
+class SceneRefViolation(BaseModel):
+    """Ссылка сцены на имя, отсутствующее в реестре сущностей.
+
+    Фиксирует страницу, проблемное поле сцены и исходное значение — чтобы
+    отчёт и корректирующий перезапрос были адресными, а имя не терялось.
+    """
+
+    page_num: int = Field(ge=1, description="Номер проблемной страницы.")
+    field: str = Field(
+        description=(
+            "Поле сцены с нарушением: characters_in_scene, location "
+            "или objects_in_scene."
+        )
+    )
+    value: str = Field(description="Исходное значение ссылки из ответа модели.")
+
+
 class JudgeVerdict(BaseModel):
     """Вердикт LLM-судьи о качестве текста и сцен."""
 
@@ -184,6 +215,14 @@ class StoryState(BaseModel):
         default_factory=list, description="Все вердикты судьи по порядку."
     )
     revision_count: int = Field(default=0, description="Число выполненных ревизий.")
+    unresolved_pages: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Номера страниц с ссылками на неизвестные имена после "
+            "корректирующего перезапроса раскадровки. Передаются в петлю "
+            "судья/ревизор для адресной правки; имена не удаляются молча."
+        ),
+    )
     status: Literal["ok", "needs_review", "failed"] = Field(
         default="ok", description="Итоговый статус прогона."
     )

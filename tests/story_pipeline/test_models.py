@@ -100,6 +100,7 @@ def _full_state() -> StoryState:
         ],
         revision_count=1,
         status="ok",
+        unresolved_pages=[2],
         metrics=[
             StageMetrics(
                 stage="plan",
@@ -183,6 +184,26 @@ def test_judge_verdict_defaults_are_isolated() -> None:
 
     assert first.problem_pages == [1]
     assert second.problem_pages == []
+
+
+def test_unresolved_pages_default_is_isolated() -> None:
+    """Мутабельный default unresolved_pages не разделяется между инстансами."""
+
+    def make_state() -> StoryState:
+        return StoryState(
+            theme="t",
+            age=4,
+            moral="m",
+            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+
+    first = make_state()
+    second = make_state()
+
+    first.unresolved_pages.append(1)
+
+    assert first.unresolved_pages == [1]
+    assert second.unresolved_pages == []
 
 
 def test_story_state_status_default_and_literal() -> None:
