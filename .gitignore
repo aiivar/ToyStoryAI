@@ -23,5 +23,6 @@ dist/
 
 # Рабочие артефакты MVP
 uploads/
+output/
 *.db
 *.db-journal

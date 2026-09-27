@@ -55,6 +55,21 @@ Telegram/MAX-бот, который превращает фотографию и
    локальной разработки — реальная генерация 5-секундного видео стоит
    около \$0.42.
 
+## Настройка Gemini (иллюстрации пайплайна)
+
+Автономный пайплайн «сказка-книжка» (`app/story_pipeline/`) рисует
+иллюстрации через Gemini — модель Nano Banana 2
+(`GEMINI_MODEL=gemini-3.1-flash-image`). Это отдельная возможность:
+существующий MAX-бот её не вызывает, а настройки пайплайна
+(`StorySettings`) читаются независимо от `MAX_BOT_TOKEN`.
+
+1. Получите API-ключ в Google AI Studio и укажите его в `GEMINI_API_KEY`.
+2. **Если `GEMINI_API_KEY` пуст, используется mock-провайдер изображений** —
+   платные вызовы не выполняются.
+3. Параметры прогона задаются переменными `STORY_*`: число страниц по
+   умолчанию и его диапазон, лимит ревизий, диапазон возраста и каталог
+   результатов.
+
 ## Конфигурация
 
 Скопируйте пример и заполните значения:
@@ -71,6 +86,17 @@ cp .env.example .env
 | `DEEPSEEK_API_KEY` | Ключ DeepSeek | пусто |
 | `DEEPSEEK_MODEL` | Модель сказки | `deepseek-flash` |
 | `DEEPSEEK_MAX_TOKENS` | Лимит токенов ответа (включая размышления reasoning-модели) | `4096` |
+| `GEMINI_API_KEY` | Ключ Gemini для иллюстраций; пусто = mock | пусто |
+| `GEMINI_BASE_URL` | Базовый URL Gemini API | `https://generativelanguage.googleapis.com` |
+| `GEMINI_MODEL` | Модель генерации изображений | `gemini-3.1-flash-image` |
+| `GEMINI_TIMEOUT` | Таймаут HTTP-запроса к Gemini, с | `120` |
+| `STORY_DEFAULT_PAGES` | Число страниц сказки по умолчанию | `6` |
+| `STORY_PAGES_MIN` | Минимальное число страниц | `1` |
+| `STORY_PAGES_MAX` | Максимальное число страниц | `12` |
+| `STORY_MAX_REVISIONS` | Лимит циклов ревизии «судья → ревизор» | `2` |
+| `STORY_AGE_MIN` | Минимальный целевой возраст | `3` |
+| `STORY_AGE_MAX` | Максимальный целевой возраст | `6` |
+| `STORY_OUTPUT_DIR` | Каталог результатов прогона | `output` |
 | `KLING_API_KEY` | Ключ видеопровайдера; пусто = mock | пусто |
 | `KLING_BASE_URL` | Базовый URL видеопровайдера | `https://api.gmi-serving.com/v1` |
 | `KLING_MODEL` | Модель image-to-video | `kling-v3-image-to-video` |
@@ -157,6 +183,15 @@ app/
     video_provider.py     # KlingProvider, MockVideoProvider, фабрика
   utils/
     logger.py             # настройка loguru
+  story_pipeline/         # автономный пайплайн «сказка-книжка» (CLI, вне бота)
+    models.py             # StoryState, артефакты, протокол Stage
+    settings.py           # StorySettings (независимо от MAX_BOT_TOKEN)
+    prompts.py            # все промпты к LLM
+    errors.py             # контракт ошибок пайплайна
+    stages/               # этапы графа (в разработке)
+    providers/            # провайдеры LLM и изображений (в разработке)
+    pipeline.py           # оркестратор (в разработке)
+    cli.py                # командный интерфейс (в разработке)
 tests/                    # pytest + pytest-asyncio
 openspec/                 # спецификации и изменения (OpenSpec)
 ```
