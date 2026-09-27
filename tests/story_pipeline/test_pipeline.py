@@ -1,0 +1,506 @@
+"""Сквозные тесты оркестратора пайплайна (`app/story_pipeline/pipeline.py`).
+
+Оркестратор собирается из инъектированных фейковых провайдеров
+(`fake_llm`, `fake_image_provider`) и прогоняется через публичный
+`async def run(state)`. Живых вызовов и чтения секретов нет.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+
+import httpx
+import pytest
+from loguru import logger
+
+from app.story_pipeline.errors import (
+    PermanentImageGenerationError,
+    PermanentLLMError,
+)
+from app.story_pipeline.models import (
+    Character,
+    ExtractedEntities,
+    JudgeVerdict,
+    KeyObject,
+    Location,
+    NarrativeArc,
+    PageScene,
+    PageText,
+    PagesPayload,
+    RevisionPayload,
+    ScenesPayload,
+    Stage,
+    StageMetrics,
+    StoryBrief,
+    StoryState,
+)
+from app.story_pipeline.observability import log_stage, total_usage
+from app.story_pipeline.pipeline import StoryPipeline
+from app.story_pipeline.providers.llm import Usage
+
+
+def _brief() -> StoryBrief:
+    """Бриф сказки, который вернёт планировщик."""
+
+    return StoryBrief(
+        logline="Плюшевый мишка идёт через лес и находит друга.",
+        controlling_idea="Смелость открывает дорогу к дружбе.",
+        character_arc="Мишка учится не бояться и помогает зайцу.",
+        narrative_arc=NarrativeArc(
+            exposition="Мишка живёт в шкафу детской.",
+            rising_action="Мишка выходит в лес и слышит плач.",
+            climax="Мишка спасает зайца от ручья.",
+            resolution="Мишка и заяц возвращаются домой друзьями.",
+        ),
+    )
+
+
+def _entities() -> ExtractedEntities:
+    """Реестр сущностей, на который ссылаются сцены без ремонта."""
+
+    return ExtractedEntities(
+        characters=[
+            Character(
+                name="Мишка",
+                appearance="коричневый плюшевый медведь",
+                clothing="красный вязаный шарф",
+                distinguishing_features="заплатка на левом ухе",
+            )
+        ],
+        locations=[Location(name="Лес", description="сосновый лес утром")],
+        key_objects=[KeyObject(name="Мяч", description="красный мяч")],
+        art_style="soft watercolor storybook illustration",
+    )
+
+
+def _pages(num_pages: int) -> PagesPayload:
+    """Ответ сценариста: ровно `num_pages` страниц с нумерацией 1..N."""
+
+    return PagesPayload(
+        pages=[
+            PageText(page_num=n, text=f"Текст страницы {n}.")
+            for n in range(1, num_pages + 1)
+        ]
+    )
+
+
+def _scenes(num_pages: int) -> ScenesPayload:
+    """Ответ раскадровщика: сцены строго по именам реестра сущностей."""
+
+    return ScenesPayload(
+        scenes=[
+            PageScene(
+                page_num=n,
+                scene_description=f"Мишка в кадре на странице {n}.",
+                characters_in_scene=["Мишка"],
+                location="Лес",
+                objects_in_scene=[],
+            )
+            for n in range(1, num_pages + 1)
+        ]
+    )
+
+
+def _ok_responses(num_pages: int = 2) -> list[object]:
+    """Ответы LLM для прогона, проходящего судью с первой попытки."""
+
+    return [
+        _brief(),
+        _pages(num_pages),
+        _entities(),
+        _scenes(num_pages),
+        JudgeVerdict(passed=True, issues=[], problem_pages=[]),
+    ]
+
+
+def _state(num_pages: int = 2) -> StoryState:
+    """Входное состояние прогона."""
+
+    return StoryState(
+        theme="Приключение плюшевого мишки",
+        age=6,
+        moral="Смелость помогает найти друзей",
+        num_pages=num_pages,
+        started_at=datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc),
+    )
+
+
+def _schema_calls(llm, schema: type) -> int:
+    """Сколько раз фейковый LLM вызван по конкретной схеме ответа."""
+
+    return sum(1 for call in llm.calls if call["schema"] is schema)
+
+
+async def test_run_fills_state_end_to_end(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Сквозной прогон заполняет всё состояние и пишет изображения на диск."""
+
+    image_provider = fake_image_provider()
+    llm = fake_llm(_ok_responses())
+    pipeline = StoryPipeline(
+        llm,
+        image_provider,
+        story_settings(story_output_dir=str(tmp_path)),
+    )
+    state = _state()
+
+    result = await pipeline.run(state)
+
+    assert result is state
+    # Текстовые артефакты всех узлов графа.
+    assert state.brief is not None
+    assert [page.page_num for page in state.pages] == [1, 2]
+    assert state.entities is not None
+    assert [scene.page_num for scene in state.scenes] == [1, 2]
+    # Иллюстрации: лист персонажей + страницы в каталоге прогона.
+    assert len(state.art_prompts) == 2
+    assert state.character_sheet_path == str(tmp_path / "character_sheet.png")
+    assert [art.page_num for art in state.images] == [1, 2]
+    assert (tmp_path / "page_1.png").exists()
+    assert (tmp_path / "page_2.png").exists()
+    # Каталог вывода выставлен оркестратором до иллюстрирования.
+    assert state.output_dir == str(tmp_path)
+    # Статус успешного прогона и временные метки.
+    assert state.status == "ok"
+    assert state.finished_at is not None
+    # Оркестратор выставляет начало прогона сам, не полагаясь на вход.
+    assert state.started_at > datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    assert state.finished_at >= state.started_at
+    # Один вызов на каждый LLM-этап без ревизий: план, сказка, извлечение,
+    # раскадровка, судья.
+    assert llm.call_count == 5
+
+
+async def test_metrics_cover_every_stage_of_the_run(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """По каждому пройденному узлу графа есть запись `StageMetrics`."""
+
+    pipeline = StoryPipeline(
+        fake_llm(_ok_responses()),
+        fake_image_provider(),
+        story_settings(story_output_dir=str(tmp_path)),
+    )
+    state = _state()
+
+    await pipeline.run(state)
+
+    assert [metric.stage for metric in state.metrics] == [
+        "plan",
+        "script",
+        "extract",
+        "scene",
+        "judge",
+        "illustrate",
+    ]
+    # LLM-этапы несут расход токенов, этап иллюстрирования — нет.
+    for metric in state.metrics[:-1]:
+        assert metric.prompt_tokens == 11
+        assert metric.completion_tokens == 22
+    assert state.metrics[-1].prompt_tokens is None
+
+
+async def test_settings_max_revisions_bounds_revision_budget(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Оркестратор передаёт лимит ревизий из настроек, а не берёт дефолт."""
+
+    failed = JudgeVerdict(
+        passed=False,
+        issues=["Сцена страницы 1 не совпадает с текстом."],
+        problem_pages=[1],
+    )
+    revision = RevisionPayload(
+        pages=[PageText(page_num=1, text="Правка текста страницы 1.")],
+        scenes=[
+            PageScene(
+                page_num=1,
+                scene_description="Правка сцены страницы 1.",
+                characters_in_scene=["Мишка"],
+                location="Лес",
+                objects_in_scene=[],
+            )
+        ],
+    )
+    llm = fake_llm(
+        [
+            _brief(),
+            _pages(2),
+            _entities(),
+            _scenes(2),
+            failed,
+            revision,
+            failed,
+        ]
+    )
+    # Лимит 1: судья вызывается дважды, ревизор — один раз, затем стоп.
+    pipeline = StoryPipeline(
+        llm,
+        fake_image_provider(),
+        story_settings(
+            story_output_dir=str(tmp_path),
+            story_max_revisions=1,
+        ),
+    )
+    state = _state()
+
+    await pipeline.run(state)
+
+    assert state.revision_count == 1
+    assert _schema_calls(llm, JudgeVerdict) == 2
+    assert _schema_calls(llm, RevisionPayload) == 1
+    assert state.status == "needs_review"
+    # Изображения всё равно сгенерированы: результат прогона не потерян.
+    assert [art.page_num for art in state.images] == [1, 2]
+
+
+async def test_logs_cover_every_stage_without_secrets(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Лог содержит имя, время и токены каждого узла, но не секреты."""
+
+    messages: list[str] = []
+    sink_id = logger.add(
+        lambda message: messages.append(str(message)),
+        level="INFO",
+        format="{message}",
+    )
+    try:
+        pipeline = StoryPipeline(
+            fake_llm(_ok_responses()),
+            fake_image_provider(),
+            story_settings(
+                story_output_dir=str(tmp_path),
+                deepseek_api_key="SECRET-DEEPSEEK-KEY",
+                gemini_api_key="SECRET-GEMINI-KEY",
+            ),
+        )
+        await pipeline.run(_state())
+    finally:
+        logger.remove(sink_id)
+
+    joined = "\n".join(messages)
+    stages = ("plan", "script", "extract", "scene", "quality", "illustrate")
+    for stage in stages:
+        assert f"stage={stage}" in joined
+    assert "duration_ms=" in joined
+    assert "tokens=" in joined
+    # Ключи провайдеров в лог не попадают.
+    assert "SECRET-DEEPSEEK-KEY" not in joined
+    assert "SECRET-GEMINI-KEY" not in joined
+
+
+def test_log_stage_formats_duration_and_tokens() -> None:
+    """Хелпер пишет имя этапа, вход/выход, время и токены одной строкой."""
+
+    messages: list[str] = []
+    sink_id = logger.add(
+        lambda message: messages.append(str(message)),
+        level="INFO",
+        format="{message}",
+    )
+    try:
+        log_stage(
+            "plan",
+            "brief=no",
+            "brief=yes",
+            12.5,
+            Usage(prompt_tokens=3, completion_tokens=4),
+        )
+    finally:
+        logger.remove(sink_id)
+
+    assert len(messages) == 1
+    assert "stage=plan" in messages[0]
+    assert "in=[brief=no]" in messages[0]
+    assert "out=[brief=yes]" in messages[0]
+    assert "duration_ms=12.5" in messages[0]
+    assert "tokens=3+4" in messages[0]
+
+
+def test_total_usage_sums_stage_metrics_ignoring_unknowns() -> None:
+    """Суммарный расход складывает известные токены, не теряя `None`."""
+
+    metrics = [
+        StageMetrics(
+            stage="judge",
+            duration_ms=1.0,
+            prompt_tokens=10,
+            completion_tokens=2,
+        ),
+        StageMetrics(
+            stage="reviser",
+            duration_ms=1.0,
+            prompt_tokens=5,
+            completion_tokens=None,
+        ),
+    ]
+
+    assert total_usage(metrics) == Usage(prompt_tokens=15, completion_tokens=2)
+    # Если токенов нет ни у одного этапа, расход неизвестен.
+    empty = StageMetrics(stage="illustrate", duration_ms=1.0)
+    assert total_usage([empty]) is None
+
+
+async def test_permanent_llm_error_marks_failed_and_reraises(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Постоянный сбой LLM помечает прогон failed и всплывает типом."""
+
+    llm = fake_llm([PermanentLLMError("нет ключа DeepSeek")])
+    pipeline = StoryPipeline(
+        llm,
+        fake_image_provider(),
+        story_settings(story_output_dir=str(tmp_path)),
+    )
+    state = _state()
+
+    with pytest.raises(PermanentLLMError):
+        await pipeline.run(state)
+
+    # Типизированная ошибка не подменяется, статус отражает провал прогона.
+    assert state.status == "failed"
+    assert state.finished_at is not None
+    # Прогон остановлен: последующие этапы не выполнялись.
+    assert llm.call_count == 1
+    assert state.brief is None
+
+
+async def test_permanent_image_error_marks_failed_and_reraises(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Постоянный сбой графического провайдера тоже помечает failed."""
+
+    provider = fake_image_provider(
+        responses=[PermanentImageGenerationError("невалидный ключ")]
+    )
+    pipeline = StoryPipeline(
+        fake_llm(_ok_responses()),
+        provider,
+        story_settings(story_output_dir=str(tmp_path)),
+    )
+    state = _state()
+
+    with pytest.raises(PermanentImageGenerationError):
+        await pipeline.run(state)
+
+    assert state.status == "failed"
+    assert state.finished_at is not None
+
+
+class _ClosableProvider:
+    """Провайдер, поддерживающий закрытие: запоминает факт вызова `aclose`."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+async def test_aclose_closes_providers_supporting_it(story_settings) -> None:
+    """Оркестратор закрывает провайдеры, поддерживающие `aclose`."""
+
+    llm = _ClosableProvider()
+    image_provider = _ClosableProvider()
+    pipeline = StoryPipeline(
+        llm,  # type: ignore[arg-type]
+        image_provider,  # type: ignore[arg-type]
+        story_settings(story_output_dir="output"),
+    )
+
+    await pipeline.aclose()
+
+    assert llm.closed is True
+    assert image_provider.closed is True
+
+
+async def test_aclose_is_safe_for_providers_without_aclose(
+    story_settings,
+    fake_llm,
+    fake_image_provider,
+) -> None:
+    """Отсутствие `aclose` у mock-провайдера не ломает закрытие."""
+
+    pipeline = StoryPipeline(
+        fake_llm([]),
+        fake_image_provider(),
+        story_settings(story_output_dir="output"),
+    )
+
+    # Не должно бросить: у обоих фейков нет `aclose`.
+    await pipeline.aclose()
+
+
+def test_stages_follow_protocol_in_graph_order(
+    story_settings,
+    fake_llm,
+    fake_image_provider,
+) -> None:
+    """Узлы графа идут в каноническом порядке и соответствуют Stage."""
+
+    pipeline = StoryPipeline(
+        fake_llm([]),
+        fake_image_provider(),
+        story_settings(story_output_dir="output"),
+    )
+
+    assert [stage.name for stage in pipeline.stages] == [
+        "plan",
+        "script",
+        "extract",
+        "scene",
+        "quality",
+        "illustrate",
+    ]
+    assert all(isinstance(stage, Stage) for stage in pipeline.stages)
+
+
+async def test_run_with_fakes_does_not_construct_network_clients(
+    tmp_path: Path,
+    monkeypatch,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """С фейковыми провайдерами оркестратор не создаёт HTTP-клиентов."""
+
+    def _forbid_client(*args: object, **kwargs: object) -> object:
+        raise AssertionError("HTTP-клиент не должен создаваться")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _forbid_client)
+    pipeline = StoryPipeline(
+        fake_llm(_ok_responses()),
+        fake_image_provider(),
+        story_settings(
+            story_output_dir=str(tmp_path),
+            deepseek_api_key="SECRET-DEEPSEEK-KEY",
+            gemini_api_key="SECRET-GEMINI-KEY",
+        ),
+    )
+    state = _state()
+
+    await pipeline.run(state)
+
+    assert state.status == "ok"
+    assert [art.page_num for art in state.images] == [1, 2]
