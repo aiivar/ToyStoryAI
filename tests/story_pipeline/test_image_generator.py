@@ -1,17 +1,14 @@
 """Тесты этапа генерации изображений (`stages/image_generator.py`).
 
 Этап принимает `ImageProvider` через конструктор, поэтому в тестах
-подставляется `FakeImageProvider` — реализация протокола без сети. Она
-записывает все вызовы и по очереди отдаёт заготовленные ответы или
-поднимает заготовленные ошибки.
+подставляется общий `FakeImageProvider` из `conftest.py` (фикстура
+`fake_image_provider`) — реализация протокола без сети.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -36,40 +33,6 @@ from app.story_pipeline.stages.prompt_builder import (
     build_art_prompt,
     build_character_sheet_prompt,
 )
-
-
-class FakeImageProvider:
-    """Фейковый `ImageProvider`: отдаёт ответы по очереди и пишет вызовы."""
-
-    def __init__(self, responses: Sequence[Any] | None = None) -> None:
-        self._responses = list(responses) if responses is not None else None
-        self.calls: list[dict[str, Any]] = []
-
-    async def generate(
-        self,
-        prompt: str,
-        *,
-        seed: int | None = None,
-        reference_images: list[bytes] | None = None,
-    ) -> GeneratedImage:
-        """Записать вызов и вернуть следующий заготовленный ответ."""
-
-        index = len(self.calls)
-        self.calls.append(
-            {
-                "prompt": prompt,
-                "seed": seed,
-                "reference_images": reference_images,
-            }
-        )
-        if self._responses is not None:
-            response = self._responses.pop(0)
-            if isinstance(response, BaseException):
-                raise response
-            return response
-        return GeneratedImage(
-            data=f"image-{index}".encode("ascii"), seed=100 + index
-        )
 
 
 def _entities() -> ExtractedEntities:
@@ -118,13 +81,14 @@ def _state(output_dir: Path, num_scenes: int = 2) -> StoryState:
 
 async def test_generates_sheet_first_then_pages_with_reference(
     tmp_path: Path,
+    fake_image_provider,
 ) -> None:
     """Сначала character sheet, затем страницы с ним как reference."""
 
     state = _state(tmp_path)
     entities = state.entities
     assert entities is not None
-    provider = FakeImageProvider()
+    provider = fake_image_provider()
 
     await ImageGeneratorStage(provider).run(state)
 
@@ -168,11 +132,14 @@ async def test_generates_sheet_first_then_pages_with_reference(
     assert state.status == "ok"
 
 
-async def test_page_failure_degrades_to_needs_review(tmp_path: Path) -> None:
+async def test_page_failure_degrades_to_needs_review(
+    tmp_path: Path,
+    fake_image_provider,
+) -> None:
     """Сбойная страница не роняет прогон: остальные создаются."""
 
     state = _state(tmp_path)
-    provider = FakeImageProvider(
+    provider = fake_image_provider(
         responses=[
             GeneratedImage(data=b"sheet", seed=5),
             TransientImageGenerationError("таймаут"),
@@ -198,11 +165,12 @@ async def test_page_failure_degrades_to_needs_review(tmp_path: Path) -> None:
 
 async def test_permanent_error_on_page_aborts_without_continuing(
     tmp_path: Path,
+    fake_image_provider,
 ) -> None:
     """Постоянный сбой страницы останавливает прогон понятной ошибкой."""
 
     state = _state(tmp_path)
-    provider = FakeImageProvider(
+    provider = fake_image_provider(
         responses=[
             GeneratedImage(data=b"sheet", seed=5),
             PermanentImageGenerationError("невалидный ключ"),
@@ -218,11 +186,14 @@ async def test_permanent_error_on_page_aborts_without_continuing(
     assert not (tmp_path / "page_2.png").exists()
 
 
-async def test_sheet_failure_aborts_before_pages(tmp_path: Path) -> None:
+async def test_sheet_failure_aborts_before_pages(
+    tmp_path: Path,
+    fake_image_provider,
+) -> None:
     """Сбой character sheet не позволяет рисовать страницы без reference."""
 
     state = _state(tmp_path)
-    provider = FakeImageProvider(
+    provider = fake_image_provider(
         responses=[TransientImageGenerationError("таймаут")]
     )
 
@@ -234,14 +205,16 @@ async def test_sheet_failure_aborts_before_pages(tmp_path: Path) -> None:
     assert state.status == "ok"
 
 
-async def test_missing_output_dir_raises_configuration_error() -> None:
+async def test_missing_output_dir_raises_configuration_error(
+    fake_image_provider,
+) -> None:
     """Без каталога вывода этап падает понятной ошибкой конфигурации."""
 
     state = _state(Path("."))
     state.output_dir = None
 
     with pytest.raises(PermanentImageGenerationError):
-        await ImageGeneratorStage(FakeImageProvider()).run(state)
+        await ImageGeneratorStage(fake_image_provider()).run(state)
 
 
 async def test_stage_with_real_mock_writes_valid_pngs(tmp_path: Path) -> None:
