@@ -8,7 +8,7 @@
 
 ## What Changes
 
-- Новый подпакет `app/story_pipeline/` внутри ToyStoryAI: восемь этапов (планировщик → сценарист → экстрактор сущностей → раскадровщик → сборщик промптов → генератор изображений → судья → ревизор) и оркестратор явного графа состояний на asyncio.
+- Новый подпакет `app/story_pipeline/` внутри ToyStoryAI: восемь этапов (планировщик → сценарист → экстрактор сущностей → раскадровщик → судья → ревизор → сборщик промптов → генератор изображений) и оркестратор явного графа состояний на asyncio. Судейство идёт до генерации изображений, чтобы не оплачивать отменённые сцены; канонический порядок — в `design.md`, раздел «Execution order».
 - Новый единый объект состояния `StoryState`, протаскиваемый между этапами и полностью сериализуемый в `story.json`.
 - Новый `StorySettings` на `pydantic-settings` — отдельный от бота, чтобы CLI не требовал `MAX_BOT_TOKEN`; переиспользует существующие `DEEPSEEK_*`.
 - Все промпты к LLM вынесены в отдельный файл `prompts.py`; схема JSON генерируется из pydantic-моделей, а не дублируется в тексте промпта.
@@ -37,7 +37,7 @@
 - **Новый код**: `app/story_pipeline/` (`models.py`, `prompts.py`, `pipeline.py`, `cli.py`, `settings.py`, `stages/`, `providers/`) и `tests/story_pipeline/`.
 - **Новые внешние зависимости**: нет — используются уже зафиксированные `httpx`, `tenacity`, `pydantic`, `pydantic-settings`, `loguru`, `pytest`, `pytest-asyncio`.
 - **Внешние API**: DeepSeek (`api.deepseek.com`, переиспользуется) и Google Gemini image (иллюстрации).
-- **Конфигурация**: новые переменные `GEMINI_API_KEY`, `GEMINI_BASE_URL`, `GEMINI_MODEL`, `GEMINI_TIMEOUT`, `STORY_*` (число страниц по умолчанию, лимит ревизий, диапазон возраста, каталог вывода); существующие `DEEPSEEK_*` переиспользуются. Обновляются `.env.example` и таблица переменных в `README.md`.
+- **Конфигурация**: новые переменные `GEMINI_API_KEY`, `GEMINI_BASE_URL`, `GEMINI_MODEL`, `GEMINI_TIMEOUT`, `STORY_DEFAULT_PAGES`, `STORY_PAGES_MIN`, `STORY_PAGES_MAX`, `STORY_MAX_REVISIONS`, `STORY_AGE_MIN`, `STORY_AGE_MAX`, `STORY_OUTPUT_DIR`; существующие `DEEPSEEK_*` переиспользуются. Обновляются `.env.example` и таблица переменных в `README.md`.
 - **Рабочие артефакты**: каталог `output/` с результатами прогонов (добавляется в `.gitignore`).
 - **Стоимость**: каждый прогон — несколько текстовых вызовов DeepSeek и `N + 1` вызовов генерации изображений (character sheet + по странице); при пустом `GEMINI_API_KEY` изображения мокаются и расходов нет.
 - **Существующее поведение**: бот MAX, его сервисы, БД и квота не изменяются.

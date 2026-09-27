@@ -1,3 +1,19 @@
+## Global Constraints
+
+Эти ограничения обязательны для каждой задачи ниже.
+
+- Язык артефактов, комментариев и docstrings — русский; идентификаторы кода — английский; пользовательские строки — русский.
+- Python 3.11+, `from __future__ import annotations`, полные type hints.
+- Все промпты к LLM — только в `app/story_pipeline/prompts.py`, нигде больше.
+- Все настройки — только через `StorySettings` (pydantic-settings); `os.getenv` в коде не используется.
+- Новых зависимостей не добавлять: используются уже зафиксированные `httpx`, `pydantic`, `pydantic-settings`, `tenacity`, `loguru`, `pytest`, `pytest-asyncio`.
+- Тесты герметичны: без живых внешних вызовов; провайдеры подменяются фейками и `httpx.MockTransport`.
+- Существующий код бота (`app/bot/`, `app/services/`, `app/db/`, `app/config.py`) не изменять; настройки пайплайна живут в `app/story_pipeline/settings.py`.
+- Definition of Done: `pytest` зелёный; изменения закоммичены Conventional Commits на русском; `README.md` и `.env.example` синхронны с кодом.
+- Новый функционал идёт с тестами; путь ошибок (повтор, таймаут, статус ошибки) важнее happy path.
+- Временные файлы — только в `.tmp/`.
+- Значения по умолчанию, обязательные для контракта: `num_pages` = 6; температуры этапов 0.7 / 0.8 / 0.3 / 0.5 / 0.0 (планировщик / сценарист / экстрактор / раскадровщик / судья); лимит ревизий = 2; диапазон возраста по умолчанию 3–6; разбор LLM: JSON-режим, снятие markdown-обёрток, один корректирующий повтор, затем типизированная ошибка; генерация изображений: до 3 попыток, страницы с reference character sheet.
+
 ## 1. Каркас пакета, настройки и промпты
 
 - [ ] 1.1 Создать структуру `app/story_pipeline/` (`models.py`, `prompts.py`, `pipeline.py`, `cli.py`, `settings.py`, `stages/`, `providers/`) и `tests/story_pipeline/`; убедиться, что `python -c "import app.story_pipeline"` выполняется успешно
@@ -6,7 +22,7 @@
 
 ## 2. Модели состояния
 
-- [ ] 2.1 Реализовать в `models.py` `NarrativeArc`, `StoryBrief`, `PageText`, `Character`, `Location`, `KeyObject`, `ExtractedEntities`, `PageScene`, `JudgeVerdict`, `PageArt`, `StageMetrics`, `StoryState` с русскими описаниями полей; убедиться, что `StoryState.model_dump(mode="json")` не содержит бинарей и обратим через `model_validate`
+- [ ] 2.1 Реализовать в `models.py` `NarrativeArc`, `StoryBrief`, `PageText`, `Character` (с вычисляемым полем-якорем `full_desc` из `appearance`/`clothing`/`distinguishing_features` в фиксированном порядке), `Location`, `KeyObject`, `ExtractedEntities`, `PageScene`, `JudgeVerdict` (включая `problem_pages`), `PageArt`, `StageMetrics`, `StoryState` (включая путь и seed character sheet) с русскими описаниями полей; убедиться, что `StoryState.model_dump(mode="json")` не содержит бинарей, включает артефакт character sheet и обратим через `model_validate`
 - [ ] 2.2 Определить протокол узла `Stage` и контракт ошибок (`StoryPipelineError`, `Transient`/`Permanent` `LLMError`, `SchemaValidationError`, `ImageGenerationError`); убедиться, что unit-тест сериализации круговой (dump → validate) проходит
 
 ## 3. LLM-клиент и разбор JSON
@@ -55,7 +71,7 @@
 
 ## 10. CLI и раскладка вывода
 
-- [ ] 10.1 Реализовать `cli.py` на `argparse` (`--theme`, `--age`, `--moral`, `--pages`, `--output`); убедиться, что тест CLI проверяет разбор аргументов, валидацию возраста по `STORY_AGE_MIN/MAX` и понятную ошибку на невалидных значениях
+- [ ] 10.1 Реализовать `cli.py` на `argparse` (`--theme`, `--age`, `--moral`, `--pages`, `--output`); убедиться, что тест CLI проверяет разбор аргументов, валидацию возраста по `STORY_AGE_MIN/MAX`, валидацию числа страниц по `STORY_PAGES_MIN/MAX` и понятную ошибку на невалидных значениях
 - [ ] 10.2 Реализовать запись `output/{timestamp}/` с `page_1.png … page_N.png` и `story.json` (полный `StoryState`); убедиться, что тест проверяет структуру каталога и круглый разбор `story.json` (критерий №1)
 - [ ] 10.3 Реализовать коды выхода (0 — успех, 1 — постоянная ошибка) и печать итогового статуса (`ok`/`needs_review`); убедиться, что тесты покрывают оба исхода
 
@@ -63,5 +79,6 @@
 
 - [ ] 11.1 Прогнать `pytest` и убедиться, что все тесты `tests/story_pipeline/` зелёные и не делают живых вызовов
 - [ ] 11.2 Сделать прогон CLI на одном тестовом примере (theme/age/moral) в mock-режиме и показать вывод: структуру `output/{timestamp}/`, содержимое `story.json` и обнаруженные проблемы
-- [ ] 11.3 Замерить на серии прогонов долю `passed=True` без ревизии и убедиться, что она не ниже 70% (критерий №3); зафиксировать результаты в описании изменения
+- [ ] 11.3 Выполнить серию живых прогонов (вне герметичного `pytest`; помечать `integration`), вычисляя долю `passed=True` без ревизии из `judge_history` прогонов; убедиться, что она не ниже 70% (критерий №3); зафиксировать результаты в описании изменения
 - [ ] 11.4 Обновить `README.md` разделом о пайплайне (назначение, запуск CLI в mock- и реальном режиме, ограничения консистентности и стоимости)
+- [ ] 11.5 Проверить вручную визуальную узнаваемость персонажа на всех слайдах одного реального прогона (критерий №2) и зафиксировать вывод
