@@ -16,14 +16,14 @@
 
 ## 1. Каркас пакета, настройки и промпты
 
-- [ ] 1.1 Создать структуру `app/story_pipeline/` (`models.py`, `prompts.py`, `pipeline.py`, `cli.py`, `settings.py`, `stages/`, `providers/`) и `tests/story_pipeline/`; убедиться, что `python -c "import app.story_pipeline"` выполняется успешно
-- [ ] 1.2 Реализовать `StorySettings` на `pydantic-settings` (переиспользование `DEEPSEEK_*`, новые `GEMINI_*` и `STORY_*`) и убедиться, что импорт и валидация настроек не требуют `MAX_BOT_TOKEN`
-- [ ] 1.3 Обновить `.env.example` и таблицу переменных в `README.md` новыми `GEMINI_*`/`STORY_*`, добавить `output/` в `.gitignore`; убедиться, что запуск CLI с примером `.env` не падает на отсутствующих переменных
+- [x] 1.1 Создать структуру `app/story_pipeline/` (`models.py`, `prompts.py`, `pipeline.py`, `cli.py`, `settings.py`, `stages/`, `providers/`) и `tests/story_pipeline/`; убедиться, что `python -c "import app.story_pipeline"` выполняется успешно
+- [x] 1.2 Реализовать `StorySettings` на `pydantic-settings` (переиспользование `DEEPSEEK_*`, новые `GEMINI_*` и `STORY_*`) и убедиться, что импорт и валидация настроек не требуют `MAX_BOT_TOKEN`
+- [x] 1.3 Обновить `.env.example` и таблицу переменных в `README.md` новыми `GEMINI_*`/`STORY_*`, добавить `output/` в `.gitignore`; убедиться, что запуск CLI с примером `.env` не падает на отсутствующих переменных
 
 ## 2. Модели состояния
 
-- [ ] 2.1 Реализовать в `models.py` `NarrativeArc`, `StoryBrief`, `PageText`, `Character` (с вычисляемым полем-якорем `full_desc` из `appearance`/`clothing`/`distinguishing_features` в фиксированном порядке), `Location`, `KeyObject`, `ExtractedEntities`, `PageScene`, `JudgeVerdict` (включая `problem_pages`), `PageArt`, `StageMetrics`, `StoryState` (включая путь и seed character sheet) с русскими описаниями полей; убедиться, что `StoryState.model_dump(mode="json")` не содержит бинарей, включает артефакт character sheet и обратим через `model_validate`
-- [ ] 2.2 Определить протокол узла `Stage` и контракт ошибок (`StoryPipelineError`, `Transient`/`Permanent` `LLMError`, `SchemaValidationError`, `ImageGenerationError`); убедиться, что unit-тест сериализации круговой (dump → validate) проходит
+- [x] 2.1 Реализовать в `models.py` `NarrativeArc`, `StoryBrief`, `PageText`, `Character` (с вычисляемым полем-якорем `full_desc` из `appearance`/`clothing`/`distinguishing_features` в фиксированном порядке), `Location`, `KeyObject`, `ExtractedEntities`, `PageScene`, `JudgeVerdict` (включая `problem_pages`), `PageArt`, `StageMetrics`, `StoryState` (включая путь и seed character sheet) с русскими описаниями полей; убедиться, что `StoryState.model_dump(mode="json")` не содержит бинарей, включает артефакт character sheet и обратим через `model_validate`
+- [x] 2.2 Определить протокол узла `Stage` и контракт ошибок (`StoryPipelineError`, `Transient`/`Permanent` `LLMError`, `SchemaValidationError`, `ImageGenerationError`); убедиться, что unit-тест сериализации круговой (dump → validate) проходит
 
 ## 3. LLM-клиент и разбор JSON
 
