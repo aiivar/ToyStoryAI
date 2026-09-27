@@ -107,8 +107,13 @@ class DeepSeekLLMClient:
         schema: type[T],
         temperature: float,
     ) -> tuple[T, Usage]:
-        """Запросить JSON по схеме и вернуть разобранную модель и Usage."""
+        """Запросить JSON по схеме и вернуть разобранную модель и Usage.
 
+        Пустой ключ — ошибка конфигурации клиента: она видна сразу, без
+        сетевого раундтрипа и вводящего в заблуждение 401.
+        """
+
+        self._require_api_key()
         try:
             return await self._request_with_retries(
                 system=system,
@@ -140,6 +145,15 @@ class DeepSeekLLMClient:
             self._client = None
 
     # --- Внутренняя реализация -----------------------------------------
+
+    def _require_api_key(self) -> None:
+        """Проверить ключ до обращения к сети, подняв постоянную ошибку."""
+
+        if not self._settings.deepseek_api_key.strip():
+            raise PermanentLLMError(
+                "Не задан DEEPSEEK_API_KEY: текстовая модель не настроена, "
+                "обращение к DeepSeek отменено."
+            )
 
     def _build_client(self) -> httpx.AsyncClient:
         if self._client is None:

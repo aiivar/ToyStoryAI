@@ -43,10 +43,13 @@ class StoryPipeline:
         llm: LLMClient,
         image_provider: ImageProvider,
         settings: StorySettings,
+        *,
+        owns_providers: bool = False,
     ) -> None:
         self._llm = llm
         self._image_provider = image_provider
         self._settings = settings
+        self._owns_providers = owns_providers
         self._stages: list[Stage] = [
             PlannerStage(llm),
             ScreenwriterStage(llm),
@@ -97,17 +100,31 @@ class StoryPipeline:
         return state
 
     async def aclose(self) -> None:
-        """Закрыть провайдеры прогона, поддерживающие `aclose`.
+        """Закрыть провайдеры, которыми владеет оркестратор.
 
-        Оркестратор — единая точка закрытия ресурсов прогона. Провайдеры без
-        `aclose` (например, `MockImageProvider`) безопасно пропускаются,
-        поэтому метод можно вызывать всегда, не зная, замоканы ли зависимости.
+        Провайдеры инъектируются снаружи и по умолчанию остаются
+        собственностью вызывающего (CLI закрывает их сам), поэтому
+        `owns_providers=False` (дефолт) делает метод безопасным no-op: чужие
+        HTTP-клиенты не вырываются из-под ног. При `owns_providers=True`
+        закрываются только провайдеры, поддерживающие `aclose` (mock
+        пропускается), и сбой закрытия одного не мешает закрыть второй:
+        ошибки собираются, первая всплывает после попытки закрыть все.
         """
 
+        if not self._owns_providers:
+            return
+        first_error: Exception | None = None
         for provider in (self._llm, self._image_provider):
             close = getattr(provider, "aclose", None)
-            if callable(close):
+            if not callable(close):
+                continue
+            try:
                 await close()
+            except Exception as exc:  # noqa: BLE001 - закрыть и остальные
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     async def _run_stage(self, stage: Stage, state: StoryState) -> None:
         """Выполнить узел, залогировав вход/выход, время и расход токенов."""

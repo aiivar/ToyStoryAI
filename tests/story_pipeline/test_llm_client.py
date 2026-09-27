@@ -226,6 +226,38 @@ async def test_transient_errors_exhaust_attempts() -> None:
     assert calls["count"] == 3
 
 
+@pytest.mark.parametrize("api_key", ["", "   "])
+async def test_empty_api_key_fails_before_http_call(api_key: str) -> None:
+    """Пустой ключ — постоянная ошибка конфигурации до любого HTTP-запроса."""
+
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(200, json=_chat_response("{}"))
+
+    settings = StorySettings(
+        _env_file=None,  # type: ignore[call-arg]
+        deepseek_api_key=api_key,
+        deepseek_model="deepseek-test",
+    )
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = DeepSeekLLMClient(settings, http_client, retry_wait=wait_none())
+    try:
+        with pytest.raises(PermanentLLMError):
+            await client.complete_json(
+                system="система",
+                user="пользователь",
+                schema=_Dummy,
+                temperature=0.7,
+            )
+    finally:
+        await http_client.aclose()
+
+    # Ни одного сетевого вызова: ошибка конфигурации видна сразу.
+    assert calls["count"] == 0
+
+
 async def test_permanent_auth_error_is_not_retried() -> None:
     """401 падает сразу постоянной ошибкой, не исчерпывая попытки."""
 

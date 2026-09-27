@@ -409,17 +409,22 @@ async def test_permanent_image_error_marks_failed_and_reraises(
 
 
 class _ClosableProvider:
-    """Провайдер, поддерживающий закрытие: запоминает факт вызова `aclose`."""
+    """Провайдер, поддерживающий закрытие: запоминает вызов `aclose`."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, fail: bool = False) -> None:
         self.closed = False
+        self._fail = fail
 
     async def aclose(self) -> None:
         self.closed = True
+        if self._fail:
+            raise RuntimeError("сбой закрытия")
 
 
-async def test_aclose_closes_providers_supporting_it(story_settings) -> None:
-    """Оркестратор закрывает провайдеры, поддерживающие `aclose`."""
+async def test_aclose_does_not_close_borrowed_providers(
+    story_settings,
+) -> None:
+    """Инъектированные провайдеры — собственность вызывающего."""
 
     llm = _ClosableProvider()
     image_provider = _ClosableProvider()
@@ -431,6 +436,29 @@ async def test_aclose_closes_providers_supporting_it(story_settings) -> None:
 
     await pipeline.aclose()
 
+    # Провайдеры не создавались оркестратором — он не имеет права их закрывать.
+    assert llm.closed is False
+    assert image_provider.closed is False
+
+
+async def test_aclose_closes_owned_providers_with_fault_isolation(
+    story_settings,
+) -> None:
+    """С `owns_providers=True` закрываются оба, сбой не мешает второму."""
+
+    llm = _ClosableProvider(fail=True)
+    image_provider = _ClosableProvider()
+    pipeline = StoryPipeline(
+        llm,  # type: ignore[arg-type]
+        image_provider,  # type: ignore[arg-type]
+        story_settings(story_output_dir="output"),
+        owns_providers=True,
+    )
+
+    with pytest.raises(RuntimeError):
+        await pipeline.aclose()
+
+    # Сбой закрытия первого провайдера не оставил второй незакрытым.
     assert llm.closed is True
     assert image_provider.closed is True
 
@@ -446,6 +474,7 @@ async def test_aclose_is_safe_for_providers_without_aclose(
         fake_llm([]),
         fake_image_provider(),
         story_settings(story_output_dir="output"),
+        owns_providers=True,
     )
 
     # Не должно бросить: у обоих фейков нет `aclose`.
