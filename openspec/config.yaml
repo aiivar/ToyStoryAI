@@ -1,0 +1,39 @@
+schema: spec-driven
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+context: |
+  Рабочий язык артефактов — русский: proposal, specs, design, tasks пишутся на русском.
+  Структурные ключевые слова OpenSpec (## ADDED Requirements,
+  ### Requirement:, #### Scenario:, - **WHEN**, - **THEN**) остаются на английском,
+  чтобы валидация и архивация работали корректно; содержание — на русском.
+  Идентификаторы в коде (переменные, функции, классы, файлы) — на английском;
+  пользовательские строки бота — на русском.
+
+  ToyStoryAI — бот для мессенджера MAX, который превращает фото игрушки в
+  персональную сказку (DeepSeek) и короткое видео (Kling AI / GMI Cloud).
+  Стек: Python 3.11+, maxapi (long polling), httpx, SQLAlchemy 2.0 async + aiosqlite,
+  pydantic-settings, pytest + pytest-asyncio, Docker.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing
