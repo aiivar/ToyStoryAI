@@ -27,17 +27,10 @@ from app.story_pipeline.prompts import (
     format_arc_plan,
 )
 from app.story_pipeline.providers.llm import LLMClient, render_schema
+from app.story_pipeline.stages._usage import add_tokens
 
 # Температура этапа написания сказки (см. spec story-text-generation).
 SCREENWRITER_TEMPERATURE = 0.8
-
-
-def _add_tokens(total: int | None, value: int | None) -> int | None:
-    """Сложить токены двух попыток, сохраняя `None` как «неизвестно»."""
-
-    if value is None:
-        return total
-    return (total or 0) + value
 
 
 def validate_page_count(pages: list[PageText], num_pages: int) -> list[str]:
@@ -130,8 +123,8 @@ class ScreenwriterStage:
                 temperature=SCREENWRITER_TEMPERATURE,
             )
             attempts += 1
-            prompt_tokens = _add_tokens(prompt_tokens, usage.prompt_tokens)
-            completion_tokens = _add_tokens(
+            prompt_tokens = add_tokens(prompt_tokens, usage.prompt_tokens)
+            completion_tokens = add_tokens(
                 completion_tokens, usage.completion_tokens
             )
             remaining = validate_page_count(payload.pages, state.num_pages)

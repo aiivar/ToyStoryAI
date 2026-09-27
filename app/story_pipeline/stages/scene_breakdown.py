@@ -27,10 +27,11 @@ from app.story_pipeline.prompts import (
     SCENE_USER,
     format_entity_registry,
     format_pages,
-    format_problem_context,
+    format_scene_pages,
     format_scene_violations,
 )
 from app.story_pipeline.providers.llm import LLMClient, render_schema
+from app.story_pipeline.stages._usage import add_tokens
 
 # Температура этапа раскадровки (см. spec story-text-generation).
 SCENE_TEMPERATURE = 0.5
@@ -38,14 +39,6 @@ SCENE_TEMPERATURE = 0.5
 # Порог нечёткого сопоставления имён через `difflib`. Ниже порога ссылка
 # считается нарушением и не подменяется наугад.
 SCENE_REF_FUZZY_THRESHOLD = 0.8
-
-
-def _add_tokens(total: int | None, value: int | None) -> int | None:
-    """Сложить токены двух попыток, сохраняя `None` как «неизвестно»."""
-
-    if value is None:
-        return total
-    return (total or 0) + value
 
 
 def _apply_repair(
@@ -221,7 +214,7 @@ class SceneBreakdownStage:
             repair_user = SCENE_REPAIR_USER.format(
                 entities=format_entity_registry(entities),
                 problem_pages=format_scene_violations(violations),
-                problem_context=format_problem_context(
+                problem_context=format_scene_pages(
                     [
                         scene
                         for scene in scenes
@@ -242,8 +235,8 @@ class SceneBreakdownStage:
                 temperature=SCENE_TEMPERATURE,
             )
             attempts += 1
-            prompt_tokens = _add_tokens(prompt_tokens, usage.prompt_tokens)
-            completion_tokens = _add_tokens(
+            prompt_tokens = add_tokens(prompt_tokens, usage.prompt_tokens)
+            completion_tokens = add_tokens(
                 completion_tokens, usage.completion_tokens
             )
             repaired = {

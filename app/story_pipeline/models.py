@@ -154,6 +154,24 @@ class JudgeVerdict(BaseModel):
     )
 
 
+class RevisionPayload(BaseModel):
+    """Обёртка ответа ревизора: обновлённые страницы и их сцены.
+
+    Как и `PagesPayload`/`ScenesPayload`, это корневой объект ответа:
+    `complete_json` разбирает ответ в pydantic-модель, а пара списков — не
+    корневой объект. Модель живёт рядом с `PageText`/`PageScene`, чтобы
+    схема ответа ревизора и её рендер были в одном месте; текст и сцена
+    идут вместе, потому что правка текста требует пересборки сцены.
+    """
+
+    pages: list[PageText] = Field(
+        description="Обновлённые тексты только проблемных страниц."
+    )
+    scenes: list[PageScene] = Field(
+        description="Обновлённые сцены тех же проблемных страниц."
+    )
+
+
 class PageArt(BaseModel):
     """Готовое изображение страницы: путь и seed, без бинарных данных."""
 
