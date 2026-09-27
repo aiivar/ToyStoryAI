@@ -17,9 +17,72 @@ ToyStoryAI — greenfield-проект: Telegram/MAX-бот, который пр
 
 ## Структура
 
+- `app/` — исходный код: `bot/` (FSM, клавиатуры, обработчики), `services/` (валидация фото, хранилище, генерация текста и видео), `db/` (модели, движок, репозиторий), `utils/` (логирование).
+- `tests/` — pytest + pytest-asyncio.
 - `openspec/` — спецификации и изменения (OpenSpec). Активное изменение: `openspec/changes/add-toy-story-max-bot/`.
 - `openspec/specs/` — утверждённые спецификации.
 - `.opencode/` — команды и скиллы OpenCode для OpenSpec-воркфлоу.
+- `scripts/smoke.py` — проверка доступов без long polling.
+- `README.md` — запуск, переменные окружения и ограничения MAX API / MVP.
+
+## Команды
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env        # заполнить MAX_BOT_TOKEN и ключи
+
+python -m app.main          # запуск бота (long polling)
+pytest                      # все тесты, кроме integration
+pytest -m integration       # живые внешние вызовы (по умолчанию выключены)
+pytest tests/test_handlers.py::test_name    # одиночный тест
+python scripts/smoke.py [--skip-max] [--skip-deepseek]
+docker-compose up --build
+```
+
+## Тесты
+
+- По умолчанию тесты герметичны: внешние API подменяются `httpx.MockTransport`, обработчики проверяются на фейковых событиях MAX. Живых вызовов в них нет.
+- Маркер `integration` — только осознанно и вручную (`pytest -m integration`): реальная генерация видео стоит ≈$0.42 за 5 с.
+- `asyncio_mode = auto` (см. `pytest.ini`) — `@pytest.mark.asyncio` вручную не расставляем.
+- Новый функционал идёт с тестами; путь ошибок (повтор, таймаут, статус ошибки) важнее happy path.
+- При баге сначала пишем падающий тест, потом фикс.
+
+## Секреты и окружение
+
+- `.env` не коммитится; `.env.example` — источник истины по переменным. Добавил настройку в `Settings` (`app/config.py`) — обнови `.env.example` и таблицу переменных в README.
+- Токены и ключи не логируем и не печатаем в чат: в логах MAX/DeepSeek/Kling не должно быть `Authorization` и ключей.
+- Пустой `KLING_API_KEY` включает `MockVideoProvider`. Для локальной разработки не задаём реальный ключ, пока это не нужно.
+- `uploads/`, `*.db`, `.tmp/` содержат персональные фото и локальное состояние — не коммитим.
+
+## Архитектура и границы
+
+- `app/bot/handlers.py` — тонкие адаптеры: разбор события, переходы FSM, вызов сервисов. Никакого HTTP и бизнес-правил внутри.
+- Бизнес-логика и внешний I/O живут в `app/services/*`; хранение — только через `app/db/repository.py`, сессию из обработчиков не дёргаем.
+- AI-провайдеры — за протоколами (`TextGenerator`, `VideoProvider`); вендор-специфику не хардкодим в бизнес-логике.
+- Все новые настройки — только через `Settings` (pydantic-settings), без `os.getenv` врассыпную.
+- Не добавляем зависимости и не расширяем scope MVP (платежи, webhook, очереди, Postgres) без спеки.
+
+## Ограничения MAX API
+
+Критично при любых доработках (подробности — в README):
+
+- Базовый URL — `platform-api2.max.ru`; токен передаётся **только** в заголовке `Authorization`.
+- `GET /chats` устарел → используем `POST /subscriptions`.
+- MAX отдаёт загруженные фото транскодированными в WebP — поэтому валидатор принимает WebP наряду с JPG/PNG.
+- Транспорт MVP — длинный polling, публичный webhook не поднимаем.
+
+## Git и определение готовности
+
+- Коммиты — Conventional Commits на русском (`feat:`, `fix:`, `chore:`), как в текущей истории.
+- Один коммит — одна логическая единица.
+- Definition of Done: `pytest` зелёный, спека обновлена в `openspec/`, README и `.env.example` синхронны с кодом.
+
+## Стиль кода
+
+- `from __future__ import annotations`, полные type hints.
+- Docstrings и комментарии — на русском, идентификаторы и сообщения логов — на английском.
+- Логирование — `loguru`; сообщения структурированные, без секретов; пользователю отдаём понятный русский текст без трассировок стека.
 
 ## Временные файлы
 
