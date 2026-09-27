@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar, cast
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -28,6 +28,9 @@ from app.story_pipeline.errors import (
     TransientLLMError,
 )
 from app.story_pipeline.settings import StorySettings
+
+# Тип ответа LLM: конкретная pydantic-модель этапа.
+T = TypeVar("T", bound=BaseModel)
 
 # Возможная markdown-обёртка вокруг JSON: ```json … ``` или ``` … ```.
 _CODE_FENCE_RE = re.compile(
@@ -60,7 +63,7 @@ def render_schema(model: type[BaseModel]) -> str:
 class LLMClient(Protocol):
     """Контракт текстовой модели: строгий JSON-ответ по pydantic-схеме."""
 
-    async def complete_json[T: BaseModel](
+    async def complete_json(
         self,
         *,
         system: str,
@@ -96,7 +99,7 @@ class DeepSeekLLMClient:
 
     # --- Публичный API --------------------------------------------------
 
-    async def complete_json[T: BaseModel](
+    async def complete_json(
         self,
         *,
         system: str,
@@ -145,7 +148,7 @@ class DeepSeekLLMClient:
             )
         return self._client
 
-    async def _request_with_retries[T: BaseModel](
+    async def _request_with_retries(
         self,
         *,
         system: str,
@@ -175,7 +178,7 @@ class DeepSeekLLMClient:
             "Не удалось получить ответ DeepSeek."
         )
 
-    async def _request_and_parse[T: BaseModel](
+    async def _request_and_parse(
         self,
         *,
         system: str,
@@ -268,7 +271,7 @@ class DeepSeekLLMClient:
         return match.group("body").strip()
 
     @classmethod
-    def _parse[T: BaseModel](cls, schema: type[T], content: str) -> T:
+    def _parse(cls, schema: type[T], content: str) -> T:
         """Разобрать JSON-текст в модель, поднимая ошибку схемы при сбое."""
 
         try:
@@ -279,7 +282,7 @@ class DeepSeekLLMClient:
             ) from exc
 
         try:
-            return schema.model_validate(payload)
+            return cast(T, schema.model_validate(payload))
         except ValidationError as exc:
             raise SchemaValidationError(
                 f"Ответ LLM не соответствует схеме {schema.__name__}: {exc}"
