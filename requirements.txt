@@ -1,0 +1,14 @@
+# ToyStoryAI — зафиксированные зависимости MVP.
+# Установка: pip install -r requirements.txt
+
+maxapi==1.2.2
+httpx==0.28.1
+pydantic==2.13.5
+pydantic-settings==2.15.0
+sqlalchemy[asyncio]==2.0.54
+aiosqlite==0.22.1
+python-dotenv==1.2.3
+tenacity==9.1.4
+loguru==0.7.3
+pytest==9.1.1
+pytest-asyncio==1.4.0

@@ -1,0 +1,15 @@
+# ToyStoryAI — локальный запуск бота в контейнере.
+services:
+  bot:
+    build: .
+    image: toystoryai-bot:latest
+    env_file:
+      - .env
+    environment:
+      # БД и uploads живут на томах, чтобы переживать пересоздание контейнера.
+      DATABASE_URL: sqlite+aiosqlite:///./data/bot.db
+      UPLOADS_DIR: uploads
+    volumes:
+      - ./uploads:/app/uploads
+      - ./data:/app/data
+    restart: unless-stopped
