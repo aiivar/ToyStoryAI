@@ -27,6 +27,7 @@ from app.story_pipeline.prompts import (
     SCENE_USER,
     format_entity_registry,
     format_pages,
+    format_problem_context,
     format_scene_violations,
 )
 from app.story_pipeline.providers.llm import LLMClient, render_schema
@@ -45,6 +46,29 @@ def _add_tokens(total: int | None, value: int | None) -> int | None:
     if value is None:
         return total
     return (total or 0) + value
+
+
+def _apply_repair(
+    scene: PageScene,
+    repaired: dict[int, PageScene],
+) -> PageScene:
+    """Заменить ссылки сцены из ответа ремонта, сохранив описание кадра.
+
+    Ремонт адресно правит только имена из реестра, поэтому `page_num` и
+    `scene_description` берутся из исходной сцены: композиция кадра не
+    переписывается вслепую.
+    """
+
+    replacement = repaired.get(scene.page_num)
+    if replacement is None:
+        return scene
+    return scene.model_copy(
+        update={
+            "characters_in_scene": replacement.characters_in_scene,
+            "location": replacement.location,
+            "objects_in_scene": replacement.objects_in_scene,
+        }
+    )
 
 
 def _match_name(value: str, candidates: list[str]) -> str | None:
@@ -193,12 +217,22 @@ class SceneBreakdownStage:
         scenes, violations = validate_scene_refs(scenes, entities)
 
         if violations:
-            problem_pages = sorted(
-                {violation.page_num for violation in violations}
-            )
+            problem_set = {violation.page_num for violation in violations}
             repair_user = SCENE_REPAIR_USER.format(
                 entities=format_entity_registry(entities),
                 problem_pages=format_scene_violations(violations),
+                problem_context=format_problem_context(
+                    [
+                        scene
+                        for scene in scenes
+                        if scene.page_num in problem_set
+                    ],
+                    [
+                        page
+                        for page in state.pages
+                        if page.page_num in problem_set
+                    ],
+                ),
                 schema=render_schema(ScenesPayload),
             )
             repair_payload, usage = await self._llm.complete_json(
@@ -215,11 +249,11 @@ class SceneBreakdownStage:
             repaired = {
                 scene.page_num: scene
                 for scene in repair_payload.scenes
-                if scene.page_num in problem_pages
+                if scene.page_num in problem_set
             }
-            scenes = [
-                repaired.get(scene.page_num, scene) for scene in scenes
-            ]
+            # Берём из ответа только ссылки: описание кадра сохраняется
+            # исходным, чтобы ремонт имён не подменял композицию.
+            scenes = [_apply_repair(scene, repaired) for scene in scenes]
             scenes, violations = validate_scene_refs(scenes, entities)
 
         state.scenes = scenes

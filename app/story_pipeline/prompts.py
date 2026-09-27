@@ -10,6 +10,7 @@ from __future__ import annotations
 from app.story_pipeline.models import (
     ExtractedEntities,
     NarrativeArc,
+    PageScene,
     PageText,
     SceneRefViolation,
 )
@@ -128,13 +129,18 @@ SCENE_USER = (
 )
 
 # Плейсхолдеры: entities (реестр допустимых имён),
-# problem_pages (страницы с нарушениями), schema (рендер схемы ScenesPayload).
+# problem_pages (страницы с нарушениями),
+# problem_context (текущие сцены и текст проблемных страниц),
+# schema (рендер схемы ScenesPayload).
 SCENE_REPAIR_USER = (
     "В раскадровке есть ссылки на имена, которых нет в реестре сущностей.\n\n"
     "Допустимые имена из реестра:\n{entities}\n\n"
     "Проблемные страницы:\n{problem_pages}\n\n"
-    "Перепиши сцены ТОЛЬКО для этих страниц, заменив неверные имена на "
-    "точные имена из реестра. Сохрани page_num, смысл и композицию кадра.\n\n"
+    "Текущие сцены и текст этих страниц:\n{problem_context}\n\n"
+    "Исправь ТОЛЬКО поля-ссылки (characters_in_scene, location, "
+    "objects_in_scene), заменив неверные имена на точные имена из реестра. "
+    "Сохрани page_num и scene_description без изменений: композиция кадра "
+    "должна остаться прежней.\n\n"
     "Верни ответ строго по JSON-схеме:\n{schema}"
 )
 
@@ -191,6 +197,32 @@ def format_scene_violations(violations: list[SceneRefViolation]) -> str:
         )
         lines.append(f"Страница {page_num}: {details}")
     return "\n".join(lines)
+
+
+def format_problem_context(
+    scenes: list[PageScene],
+    pages: list[PageText],
+) -> str:
+    """Собрать текущие проблемные сцены вместе с текстом их страниц.
+
+    Нужно корректирующему перезапросу: модель видит исходную композицию
+    кадра и действие страницы, поэтому правит только ссылки, а не кадр.
+    """
+
+    texts = {page.page_num: page.text for page in pages}
+    blocks: list[str] = []
+    for scene in scenes:
+        characters = ", ".join(scene.characters_in_scene) or "нет"
+        objects = ", ".join(scene.objects_in_scene) or "нет"
+        blocks.append(
+            f"Страница {scene.page_num}.\n"
+            f"Текст страницы: {texts.get(scene.page_num, '')}\n"
+            f"Текущая сцена: {scene.scene_description}\n"
+            f"Персонажи: {characters}\n"
+            f"Локация: {scene.location}\n"
+            f"Объекты: {objects}"
+        )
+    return "\n\n".join(blocks)
 
 
 def _beat_page_ranges(num_pages: int) -> list[str]:

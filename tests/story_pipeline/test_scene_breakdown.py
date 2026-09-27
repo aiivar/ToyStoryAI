@@ -284,6 +284,78 @@ async def test_scene_breakdown_repairs_problem_pages_once(fake_llm) -> None:
     assert metric.completion_tokens == 44
 
 
+async def test_scene_breakdown_repair_prompt_includes_current_page_context(
+    fake_llm,
+) -> None:
+    """Перезапросу передан контекст проблемной страницы: текущая сцена и текст."""
+
+    bad_page = PageScene(
+        page_num=1,
+        scene_description="Мишка стоит у окна детской.",
+        characters_in_scene=["Дракон"],
+        location="Детская",
+        objects_in_scene=[],
+    )
+    fixed_page = PageScene(
+        page_num=1,
+        scene_description="Мишка у окна.",
+        characters_in_scene=["Мишка"],
+        location="Детская",
+        objects_in_scene=[],
+    )
+    llm = fake_llm(
+        [
+            ScenesPayload(scenes=[bad_page]),
+            ScenesPayload(scenes=[fixed_page]),
+        ]
+    )
+    stage = SceneBreakdownStage(llm)
+    state = _state()
+
+    await stage.run(state)
+
+    repair_user = llm.calls[1]["user"]
+    # Текущее описание кадра — чтобы модель видела, что именно правит.
+    assert "Мишка стоит у окна детской." in repair_user
+    # Текст проблемной страницы — контекст действия.
+    assert "Мишка вышел из шкафа в детской." in repair_user
+
+
+async def test_scene_breakdown_repair_keeps_original_scene_description(
+    fake_llm,
+) -> None:
+    """Ремонт правит ссылки, но не подменяет композицию кадра."""
+
+    bad_page = PageScene(
+        page_num=1,
+        scene_description="Мишка стоит у окна детской.",
+        characters_in_scene=["Дракон"],
+        location="Детская",
+        objects_in_scene=[],
+    )
+    rewritten_page = PageScene(
+        page_num=1,
+        scene_description="Совсем другой кадр про зайца в лесу.",
+        characters_in_scene=["Мишка"],
+        location="Детская",
+        objects_in_scene=[],
+    )
+    llm = fake_llm(
+        [
+            ScenesPayload(scenes=[bad_page]),
+            ScenesPayload(scenes=[rewritten_page]),
+        ]
+    )
+    stage = SceneBreakdownStage(llm)
+    state = _state()
+
+    await stage.run(state)
+
+    # Ссылка исправлена, а исходное описание кадра сохранено.
+    assert state.scenes[0].characters_in_scene == ["Мишка"]
+    assert state.scenes[0].scene_description == "Мишка стоит у окна детской."
+
+
 async def test_scene_breakdown_marks_unresolved_pages_without_failing(
     fake_llm,
 ) -> None:
