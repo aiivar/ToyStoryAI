@@ -174,6 +174,27 @@ def test_dump_has_no_binary_and_keeps_character_sheet() -> None:
     assert isinstance(dumped["started_at"], str)
 
 
+def test_toy_description_round_trips_as_plain_text() -> None:
+    """Описание игрушки переживает JSON-цикл и остаётся строкой, не бинарём."""
+
+    state = _full_state().model_copy(
+        update={"toy_description": "Коричневый плюшевый медвежонок в шарфе."}
+    )
+
+    dumped = state.model_dump(mode="json")
+    json.dumps(dumped)
+    restored = StoryState.model_validate(dumped)
+
+    assert restored.toy_description == state.toy_description
+    assert isinstance(dumped["toy_description"], str)
+
+
+def test_toy_description_defaults_to_none() -> None:
+    """Без фото (CLI-сценарий) описание игрушки пусто, а не выдумано."""
+
+    assert _full_state().toy_description is None
+
+
 def test_judge_verdict_defaults_are_isolated() -> None:
     """Мутабельный default problem_pages не разделяется между инстансами."""
 

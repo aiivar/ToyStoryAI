@@ -27,6 +27,11 @@ from app.story_pipeline.models import (
     StoryState,
 )
 from app.story_pipeline.stages.judge import JudgeStage, validate_judge_verdict
+
+# Описание игрушки-героя в прогоне: тот же источник правды, что у экстрактора.
+TOY_DESCRIPTION = (
+    "Плюшевый медвежонок: коричневый, мягкий плюш, заплатка на левом ухе."
+)
 from app.story_pipeline.stages.quality_loop import QualityReviewLoop
 from app.story_pipeline.stages.reviser import ReviserStage
 
@@ -196,6 +201,50 @@ async def test_judge_prompt_lists_four_criteria(fake_llm) -> None:
     assert "не противоречит" in user
     # Критериев ровно четыре — заголовок не устарел.
     assert "по четырём критериям" in user
+
+
+async def test_judge_prompt_receives_toy_description_and_registry(
+    fake_llm,
+) -> None:
+    """Судье нужны описание игрушки и реестр, иначе критерий невыполним.
+
+    Реестр в промпте судьи раньше отсутствовал: четвёртый критерий требовал
+    сверить текст с визуальным описанием, которого модель не видела, — такой
+    «проверяемый» критерий всегда проходил бы вслепую.
+    """
+
+    llm = fake_llm([JudgeVerdict(passed=True, issues=[], problem_pages=[])])
+    stage = JudgeStage(llm)
+    state = _state()
+    state.toy_description = TOY_DESCRIPTION
+
+    await stage.run(state)
+
+    user = llm.calls[0]["user"]
+    assert TOY_DESCRIPTION in user
+    for character in _entities().characters:
+        assert character.full_desc in user
+    assert _entities().art_style in user
+    # Сводка планировщика в промпт судьи не подставляется.
+    assert state.theme not in user
+
+
+async def test_judge_prompt_without_toy_description_is_clean(fake_llm) -> None:
+    """Пустое описание и пустой реестр не роняют судью и не дают «None»."""
+
+    llm = fake_llm([JudgeVerdict(passed=True, issues=[], problem_pages=[])])
+    stage = JudgeStage(llm)
+    state = _state()
+    state.toy_description = None
+    state.entities = None
+
+    await stage.run(state)
+
+    user = llm.calls[0]["user"]
+    assert "Описание игрушки-героя" in user
+    assert "Реестр сущностей" in user
+    assert "None" not in user
+    assert "\n\n\n" not in user
 
 
 async def test_judge_requires_brief(fake_llm) -> None:

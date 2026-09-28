@@ -209,6 +209,15 @@ class StoryState(BaseModel):
     age: int = Field(description="Целевой возраст читателя.")
     moral: str = Field(description="Мораль, которую несёт сказка.")
     num_pages: int = Field(default=6, description="Число страниц сказки.")
+    toy_description: str | None = Field(
+        default=None,
+        description=(
+            "Описание внешности игрушки-героя по фотографии родителя. "
+            "Единый источник правды об облике: его читают планировщик, "
+            "экстрактор и судья, поэтому разойтись с ним текст и иллюстрации "
+            "не могут. Пусто в CLI-сценарии, где фото нет."
+        ),
+    )
 
     # --- Артефакты этапов ----------------------------------------------
     brief: StoryBrief | None = Field(default=None, description="План сказки.")

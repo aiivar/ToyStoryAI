@@ -23,7 +23,9 @@ from app.story_pipeline.prompts import (
     JUDGE_SYSTEM,
     JUDGE_USER,
     format_arc_plan,
+    format_optional_entity_registry,
     format_scene_pages,
+    format_toy_description,
 )
 from app.story_pipeline.providers.llm import LLMClient, render_schema
 
@@ -81,6 +83,8 @@ class JudgeStage:
             controlling_idea=brief.controlling_idea,
             arc_plan=format_arc_plan(brief.narrative_arc, state.num_pages),
             age=state.age,
+            toy_description=format_toy_description(state.toy_description),
+            entities=format_optional_entity_registry(state.entities),
             story=format_scene_pages(state.scenes, state.pages),
             schema=render_schema(JudgeVerdict),
         )

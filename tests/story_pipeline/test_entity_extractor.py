@@ -118,6 +118,48 @@ async def test_entity_extractor_prompt_requests_verifiable_anchors(
     assert "$defs" in user
 
 
+async def test_entity_extractor_prompt_uses_toy_description_field(
+    fake_llm,
+) -> None:
+    """Экстрактор берёт описание из `state.toy_description`, а не из `theme`.
+
+    `theme` — формулировка задачи для планировщика (D18); описание едет
+    отдельным полем, иначе экстрактор получил бы воду вместо облика героя.
+    """
+
+    llm = fake_llm([_registry()])
+    stage = EntityExtractorStage(llm)
+    state = _state()
+    state.toy_description = TOY_DESCRIPTION
+
+    await stage.run(state)
+
+    user = llm.calls[0]["user"]
+    assert TOY_DESCRIPTION in user
+    # Короткая сводка планировщика в промпт экстрактора не подставляется.
+    assert state.theme not in user
+
+
+async def test_entity_extractor_prompt_without_toy_description_is_clean(
+    fake_llm,
+) -> None:
+    """Пустое описание не роняет промпт: блок остаётся внятным заглушкой."""
+
+    llm = fake_llm([_registry()])
+    stage = EntityExtractorStage(llm)
+    state = _state()
+    state.toy_description = None
+
+    await stage.run(state)
+
+    user = llm.calls[0]["user"]
+    assert "Описание игрушки-героя" in user
+    # Ни «None», ни дырок от пустого блока в промпте нет.
+    assert "None" not in user
+    assert ". ." not in user
+    assert "\n\n\n" not in user
+
+
 async def test_entity_extractor_prompt_forbids_inventing_appearance(
     fake_llm,
 ) -> None:
@@ -131,7 +173,7 @@ async def test_entity_extractor_prompt_forbids_inventing_appearance(
     llm = fake_llm([_registry()])
     stage = EntityExtractorStage(llm)
     state = _state()
-    state.theme = f"Сказка про игрушку: {TOY_DESCRIPTION}"
+    state.toy_description = TOY_DESCRIPTION
 
     await stage.run(state)
 
