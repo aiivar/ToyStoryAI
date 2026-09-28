@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,7 +29,10 @@ from typing import Any, Protocol
 from maxapi.enums.upload_type import UploadType
 from maxapi.types.input_media import InputMediaBuffer
 
-from app.bot.keyboards import build_restart_keyboard
+from app.bot.keyboards import (
+    build_restart_keyboard,
+    build_subscription_keyboard,
+)
 from app.bot.messaging import ChatSender
 from app.bot.story_request import (
     build_run_dir,
@@ -62,6 +65,10 @@ ILLUSTRATE_STAGE = "illustrate"
 STORY_PROGRESS = "Готовлю сказку…"
 ILLUSTRATION_PROGRESS = "Рисую страницы…"
 STORY_READY = "Сказка готова! Читайте страницы по порядку."
+FREE_LIMIT_REACHED = (
+    "Вы уже получили бесплатную сказку с картинками. Чтобы сделать новую, "
+    "оформите подписку."
+)
 
 # Заголовок сообщения со страницей. Нумерация — из пайплайна, а не счётчик
 # доставки: если файл страницы не отправился, текст всё равно приходит с
@@ -81,11 +88,18 @@ PAGE_IMAGE_SKIPPED = (
     "остаётся у вас."
 )
 
-# Итог частичного прогона: каких страниц не хватило и почему.
+# Итог частичного прогона: каких страниц не хватило.
+#
+# Причина в чате — фиксированная русская фраза. Технический текст из
+# `StageMetrics.error` (английский, с HTTP-кодами и URL провайдера) в чат не
+# попадает: родителю он ничего не объясняет, а показывать ссылку на
+# эндпоинт в личном диалоге незачем. Техническая причина уходит в лог и в
+# запись о прогоне — там она и нужна.
 PARTIAL_TITLE = "К сожалению, сказка получилась не полной"
+PARTIAL_REASON = "картинку к ней отрисовать не вышло: сервис не ответил"
 PARTIAL_RESULT = (
     f"{PARTIAL_TITLE}: без картинок остались страницы {{numbers}}. "
-    "Причина: {reason}"
+    f"Причина: {PARTIAL_REASON}."
 )
 
 # Повторная попытка предлагается один раз: без ограничения переделки
@@ -148,6 +162,12 @@ class _ActiveRun:
     task: asyncio.Task[None]
     chat_id: int
     tale_id: int
+
+
+def numbers_text(numbers: Sequence[int]) -> str:
+    """Номера страниц через запятую для сообщения пользователю."""
+
+    return ", ".join(str(number) for number in numbers)
 
 
 def _read_page_attachment(path: str) -> InputMediaBuffer:
@@ -296,9 +316,24 @@ class StoryRunner:
     # --- Прогон ----------------------------------------------------------
 
     async def run(self, request: RunRequest) -> None:
-        """Выполнить генерацию: распознавание → пайплайн → запись и выдача."""
+        """Выполнить генерацию: квота → распознавание → пайплайн → выдача.
+
+        Проверка квоты идёт первым шагом, до распознавания: распознавание
+        игрушки — платный вызов, и запускать его пользователю, которому
+        сказка уже выдана, незачем.
+        """
 
         send = self._sender_for(request.chat_id)
+
+        if await self._repository.has_completed_tale(request.user_id):
+            logger.info(
+                "Квота пользователя {} израсходована, прогон не запускаю",
+                request.user_id,
+            )
+            await send(
+                FREE_LIMIT_REACHED, [build_subscription_keyboard().as_markup()]
+            )
+            return
 
         try:
             description = await self._vision.describe(request.photo)
@@ -310,34 +345,40 @@ class StoryRunner:
             await send(VISION_FAILED, [build_restart_keyboard().as_markup()])
             return
 
-        run_settings = self._settings.model_copy(
-            update={
-                "story_output_dir": build_run_dir(
-                    request.user_id, self._settings
-                )
-            }
-        )
-        announced: set[str] = set()
-
-        async def on_stage(stage_name: str) -> None:
-            await self._report_stage(send, stage_name, announced)
-
-        state = StoryState(
-            theme=build_theme(description, request.moral, request.age),
-            age=request.age,
-            moral=request.moral,
-            num_pages=self.num_pages,
-            toy_description=build_toy_description(description),
-            output_dir=run_settings.story_output_dir,
-            started_at=datetime.now(timezone.utc),
-        )
-
-        pipeline = self._make_pipeline(
-            settings=run_settings,
-            reference_photo=request.photo,
-            on_stage=on_stage,
-        )
+        # Сборка настроек, состояния и пайплайна идёт внутри `try`:
+        # создание клиента LLM и провайдера картинок тоже умеет падать
+        # (неверное соотношение сторон, пустой ключ), и такой сбой обязан
+        # закончиться сообщением пользователю, а не тишиной после
+        # «Запускаю сказку!».
+        pipeline: StoryPipeline | None = None
         try:
+            run_settings = self._settings.model_copy(
+                update={
+                    "story_output_dir": build_run_dir(
+                        request.user_id, self._settings
+                    )
+                }
+            )
+            announced: set[str] = set()
+
+            async def on_stage(stage_name: str) -> None:
+                await self._report_stage(send, stage_name, announced)
+
+            state = StoryState(
+                theme=build_theme(description, request.moral, request.age),
+                age=request.age,
+                moral=request.moral,
+                num_pages=self.num_pages,
+                toy_description=build_toy_description(description),
+                output_dir=run_settings.story_output_dir,
+                started_at=datetime.now(timezone.utc),
+            )
+
+            pipeline = self._make_pipeline(
+                settings=run_settings,
+                reference_photo=request.photo,
+                on_stage=on_stage,
+            )
             state = await pipeline.run(state)
         except Exception as exc:  # noqa: BLE001 - обрыв фоновой задачи
             logger.error("Прогон сказки сорвался: {}", exc)
@@ -398,7 +439,13 @@ class StoryRunner:
             set(range(1, state.num_pages + 1))
             - {art.page_num for art in state.images}
         )
-        reason = self._partial_reason(state)
+        reason = self._technical_reason(state)
+        logger.warning(
+            "Прогон {} частичный: страниц без картинки={} причина={}",
+            request.tale_id,
+            numbers_text(missing),
+            reason,
+        )
         await self._record(
             request,
             status=GenerationStatus.FAILED,
@@ -406,9 +453,8 @@ class StoryRunner:
             error=reason,
         )
         await self._deliver_pages(send, state)
-        numbers = ", ".join(str(number) for number in missing)
         await send(
-            PARTIAL_RESULT.format(numbers=numbers, reason=reason),
+            PARTIAL_RESULT.format(numbers=numbers_text(missing)),
             [build_restart_keyboard().as_markup()],
         )
         if request.user_id in self._redo_offered:
@@ -425,18 +471,19 @@ class StoryRunner:
         )
 
     @staticmethod
-    def _partial_reason(state: StoryState) -> str:
-        """Причина статуса «требует проверки» из метрик прогона.
+    def _technical_reason(state: StoryState) -> str:
+        """Техническая причина статуса «требует проверки» из метрик прогона.
 
         Причина живёт в метриках этапов: пайплайн не поднимает исключение
         при частичном результате, поэтому текст ошибки нужно взять из
-        последней метрики с ошибкой.
+        последней метрики с ошибкой. Значение уходит только в лог и в запись
+        о прогоне — в чате пользователь видит `PARTIAL_REASON`.
         """
 
         for metric in reversed(state.metrics):
             if metric.error:
                 return metric.error
-        return "прогон завершён с частичным результатом"
+        return "прогон завершён с частичным результатом без метрики с ошибкой"
 
     async def _send_page(
         self,
@@ -572,9 +619,14 @@ class StoryRunner:
             del self._runs[user_id]
 
     @staticmethod
-    async def _close_quietly(pipeline: Any) -> None:
-        """Закрыть провайдеры пайплайна, не дав сбою закрытия затереть статус."""
+    async def _close_quietly(pipeline: StoryPipeline | None) -> None:
+        """Закрыть провайдеры пайплайна, не дав сбою закрытия затереть статус.
 
+        `None` — пайплайн не успел собраться, закрывать нечего.
+        """
+
+        if pipeline is None:
+            return
         close = getattr(pipeline, "aclose", None)
         if not callable(close):
             return

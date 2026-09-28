@@ -25,8 +25,14 @@ from app.bot.runner import RunRequest, StoryRunner
 from app.db.models import GenerationStatus
 from app.services.toy_vision import ToyDescription
 from app.story_pipeline.errors import StoryPipelineError
-from app.story_pipeline.models import PageArt, PageText, StoryState
+from app.story_pipeline.models import (
+    PageArt,
+    PageText,
+    StageMetrics,
+    StoryState,
+)
 from app.story_pipeline.settings import StorySettings
+from tests.bot_harness import keyboard_labels
 from tests.factories import make_jpeg, make_webp
 
 TMP_ROOT = Path(".tmp/tests")
@@ -164,10 +170,12 @@ class BlockingPipeline(RecordingPipeline):
 
 
 class FakeRepository:
-    """Заглушка репозитория: помнит вызовы `update_result`."""
+    """Заглушка репозитория: помнит вызовы и отвечает про квоту."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, story_used: bool = False) -> None:
         self.updates: list[dict[str, Any]] = []
+        self.story_used = story_used
+        self.quota_checks: list[int] = []
 
     async def update_result(
         self,
@@ -175,6 +183,10 @@ class FakeRepository:
         **kwargs: Any,
     ) -> None:
         self.updates.append({"generation_id": generation_id, **kwargs})
+
+    async def has_completed_tale(self, user_id: int) -> bool:
+        self.quota_checks.append(user_id)
+        return self.story_used
 
     @property
     def statuses(self) -> list[Any]:
@@ -197,12 +209,13 @@ def make_runner(
     vision: FakeVision | None = None,
     settings: StorySettings | None = None,
     bot: FakeBot | None = None,
+    repository: FakeRepository | None = None,
 ) -> RunnerBundle:
     """Собрать раннер с фейковыми ботом, репозиторием и пайплайном."""
 
     bot = bot or FakeBot()
     pipeline = pipeline or RecordingPipeline()
-    repository = FakeRepository()
+    repository = repository or FakeRepository()
 
     def factory(**kwargs: Any) -> RecordingPipeline:
         pipeline.bind(kwargs)
@@ -426,6 +439,49 @@ async def test_state_carries_deterministic_theme_and_toy_description(
     assert state.num_pages == bundle.pipeline.calls[0].settings.story_default_pages
 
 
+# --- Квота: вторая платная сказка не запускается ------------------------------
+
+
+async def test_used_story_blocks_generation_before_any_paid_work(
+    tmp_path: Path,
+) -> None:
+    """Израсходованная квота останавливает прогон до распознавания и пайплайна."""
+
+    vision = FakeVision()
+    bundle = make_runner(
+        pipeline=RecordingPipeline(result=made_state(tmp_path)),
+        vision=vision,
+        repository=FakeRepository(story_used=True),
+    )
+
+    await bundle.runner.run(make_request())
+
+    assert bundle.repository.quota_checks == [1]
+    assert vision.photos == []  # платное распознавание не вызывалось
+    assert bundle.pipeline.calls == []  # платный пайплайн не собирался
+    assert bundle.bot.sent_texts == [runner_module.FREE_LIMIT_REACHED]
+    assert keyboard_labels(bundle.bot.sent[0].attachments) == [
+        ["Оформить подписку"]
+    ]
+
+
+async def test_free_story_is_allowed_for_new_user(tmp_path: Path) -> None:
+    """Без завершённых сказок прогон идёт как обычно."""
+
+    bundle = make_runner(
+        pipeline=RecordingPipeline(result=made_state(tmp_path)),
+        repository=FakeRepository(story_used=False),
+    )
+
+    await bundle.runner.run(make_request())
+
+    assert bundle.repository.quota_checks == [1]
+    assert bundle.pipeline.calls
+    assert runner_module.FREE_LIMIT_REACHED not in [
+        text for text in bundle.bot.sent_texts
+    ]
+
+
 # --- 5.5: постраничная выдача ------------------------------------------------
 
 
@@ -603,6 +659,56 @@ async def test_unexpected_error_in_task_is_recorded(tmp_path: Path) -> None:
     assert bundle.runner.pending == 0
 
 
+async def test_failing_pipeline_factory_explains_to_user(tmp_path: Path) -> None:
+    """Сбой сборки пайплайна не оставляет пользователя в тишине.
+
+    Сборка провайдеров (клиент LLM, провайдер картинок, валидация настроек)
+    стоит до `pipeline.run()`, поэтому раньше её исключение уходило мимо
+    сообщения пользователю: тот видел «Запускаю сказку!» и больше ничего.
+    """
+
+    bot = FakeBot()
+    bundle = make_runner(
+        pipeline=RecordingPipeline(result=made_state(tmp_path)), bot=bot
+    )
+
+    def broken_factory(**kwargs: Any) -> RecordingPipeline:
+        raise ValueError("STORY_IMAGE_ASPECT_RATIO: неподдерживаемое значение")
+
+    bundle.runner._make_pipeline = broken_factory  # noqa: SLF001 - подмена фейка
+
+    await bundle.runner.run(make_request(tale_id=5))
+
+    assert bundle.bot.sent_texts == [runner_module.GENERATION_FAILED]
+    assert "Traceback" not in (bundle.bot.sent_texts[0] or "")
+    assert bundle.repository.updates[-1]["generation_id"] == 5
+    assert bundle.repository.updates[-1]["status"] is GenerationStatus.FAILED
+
+
+async def test_failing_factory_in_background_task_sends_message(
+    tmp_path: Path,
+) -> None:
+    """То же самое через фоновую задачу: сообщение уходит, статус пишется."""
+
+    bundle = make_runner(
+        pipeline=RecordingPipeline(result=made_state(tmp_path))
+    )
+
+    def broken_factory(**kwargs: Any) -> RecordingPipeline:
+        raise RuntimeError("провайдер не собирается")
+
+    bundle.runner._make_pipeline = broken_factory  # noqa: SLF001 - подмена фейка
+
+    assert bundle.runner.start(make_request(tale_id=6)) is True
+    await bundle.runner.wait_idle()
+
+    assert bundle.bot.sent_texts == [runner_module.GENERATION_FAILED]
+    assert bundle.repository.updates[-1]["generation_id"] == 6
+    assert "провайдер не собирается" in str(
+        bundle.repository.updates[-1]["error"]
+    )
+
+
 async def test_missing_page_file_keeps_page_text(tmp_path: Path) -> None:
     """Пропавший файл страницы: текст отправляется, ссылка на каталог — нет."""
 
@@ -666,8 +772,99 @@ async def test_partial_result_delivers_ready_pages_and_explains_missing(
         "Страница 3\nТекст страницы 3.\n\n" + runner_module.PAGE_IMAGE_SKIPPED,
     ]
     assert any(
-        runner_module.PARTIAL_TITLE in (text or "") for text in bundle.bot.sent_texts
+        runner_module.PARTIAL_TITLE in (text or "")
+        for text in bundle.bot.sent_texts
     )
+
+
+async def test_partial_result_names_missing_pages_and_reason(
+    tmp_path: Path,
+) -> None:
+    """Пользователь узнаёт, каких именно страниц нет и почему."""
+
+    state = made_state(
+        tmp_path,
+        status="needs_review",
+        pages=4,
+        illustrated=(1, 2),
+    )
+    state.metrics.append(
+        StageMetrics(
+            stage="illustrate",
+            duration_ms=10.0,
+            error=(
+                "illustration: page 3 failed after retries: "
+                "TransientImageGenerationError "
+                "(HTTP 429) https://api.routerai.ru/api/v1/images"
+            ),
+        )
+    )
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request())
+
+    summary = next(
+        text
+        for text in bundle.bot.sent_texts
+        if text and text.startswith(runner_module.PARTIAL_TITLE)
+    )
+    assert "3, 4" in summary
+    assert runner_module.PARTIAL_REASON in summary
+    # Техническая причина провайдера в чат не попадает: она английская и
+    # может содержать URL.
+    assert "TransientImageGenerationError" not in summary
+    assert "routerai.ru" not in summary
+    assert "Traceback" not in summary
+    # В запись о прогоне техническая причина, наоборот, нужна.
+    update = bundle.repository.updates[-1]
+    assert "TransientImageGenerationError" in str(update["error"])
+
+
+async def test_partial_result_reason_has_russian_fallback(
+    tmp_path: Path,
+) -> None:
+    """Без метрик с ошибкой показывается понятная причина, а не пустота."""
+
+    state = made_state(
+        tmp_path, status="needs_review", pages=1, illustrated=()
+    )
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request())
+
+    summary = next(
+        text
+        for text in bundle.bot.sent_texts
+        if text and text.startswith(runner_module.PARTIAL_TITLE)
+    )
+    assert runner_module.PARTIAL_REASON in summary
+    assert "None" not in summary
+
+
+async def test_partial_result_offers_redo_with_restart_keyboard(
+    tmp_path: Path,
+) -> None:
+    """Предложение повтора приходит с кнопкой «Начать заново»."""
+
+    state = made_state(
+        tmp_path, status="needs_review", pages=2, illustrated=(1,)
+    )
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request())
+
+    summary_items = [
+        item
+        for item in bundle.bot.sent
+        if item.text and item.text.startswith(runner_module.PARTIAL_TITLE)
+    ]
+    redo_items = [
+        item for item in bundle.bot.sent if item.text == runner_module.PARTIAL_REDO
+    ]
+    assert len(summary_items) == 1
+    assert len(redo_items) == 1
+    for item in (*summary_items, *redo_items):
+        assert keyboard_labels(item.attachments) == [["Начать заново"]]
 
 
 async def test_partial_result_is_not_counted_as_completed(

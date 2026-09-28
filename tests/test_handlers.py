@@ -15,11 +15,12 @@ from uuid import uuid4
 import pytest
 
 from app.bot import handlers as handlers_module
+from app.bot import runner as runner_module
 from app.bot.handlers import register_handlers
 from app.bot.keyboards import MORAL_OPTIONS
 from app.bot.states import StoryFlow
 from app.config import Settings
-from app.db.models import GenerationType
+from app.db.models import GenerationStatus, GenerationType
 from app.db.repository import GenerationRepository
 from app.services.storage import PhotoStorage
 from tests.bot_harness import (
@@ -464,6 +465,53 @@ async def test_moral_without_photo_resets_dialog(
 
     assert event.sent_texts == [handlers_module.RESTART_HINT]
     assert pipeline.calls == []
+
+
+async def test_used_story_is_not_generated_again(
+    settings: Settings,
+    repository: GenerationRepository,
+    storage: PhotoStorage,
+) -> None:
+    """Пользователь с готовой сказкой получает предложение подписки.
+
+    Проверка идёт в фоновой задаче, до распознавания и пайплайна: обе операции
+    платные, и запускать их израсходованному пользователю незачем.
+    """
+
+    tale = await repository.create_tale(1)
+    await repository.update_result(
+        tale.id, status=GenerationStatus.SUCCESS, tale_text="Старая сказка"
+    )
+
+    sender = FakeSender()
+    vision = FakeVision()
+    pipeline = FakePipeline()
+    registered, _ = _register(
+        settings,
+        repository,
+        storage,
+        sender=sender,
+        vision=vision,
+        pipeline=pipeline,
+        download_photo=_photo_download(make_photo_bytes(400, 400)),
+    )
+    context = FakeContext(state=StoryFlow.waiting_photo)
+    await _prepare_dialog(registered, context)
+    await registered.callback(FakeMessageCallback("age:4"), context)
+
+    await registered.callback(FakeMessageCallback("moral:0"), context)
+    await registered.runs.wait_idle()
+
+    assert sender.sent_texts == [runner_module.FREE_LIMIT_REACHED]
+    assert keyboard_labels(sender.sent[0].attachments) == [
+        ["Оформить подписку"]
+    ]
+    assert vision.photos == []
+    assert pipeline.calls == []
+
+    stub = FakeMessageCallback("subscribe", message=FakeMessage())
+    await registered.callback(stub, context)
+    assert stub.sent_texts == [handlers_module.SUBSCRIPTION_STUB]
 
 
 # --- 5.8: защита от повторного запуска ----------------------------------------

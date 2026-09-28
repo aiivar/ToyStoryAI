@@ -202,6 +202,84 @@ async def test_quota_not_used_for_new_user(
     assert await repository.has_completed_full_generation(707) is False
 
 
+# --- Квота «одна завершённая сказка» (has_completed_tale) --------------------
+
+
+async def test_completed_tale_counts_as_used_story(
+    repository: GenerationRepository,
+) -> None:
+    """Успешная сказка — использованная бесплатная сказка."""
+
+    assert await repository.has_completed_tale(808) is False
+
+    tale = await repository.create_tale(808)
+    await repository.update_result(
+        tale.id, status=GenerationStatus.SUCCESS, tale_text="text"
+    )
+
+    assert await repository.has_completed_tale(808) is True
+
+
+async def test_old_style_tale_with_video_counts_as_used_story(
+    repository: GenerationRepository,
+) -> None:
+    """Старая успешная сказка прежнего формата тоже засчитывается."""
+
+    tale = await repository.create_tale(909)
+    video = await repository.create_video(909, request_id="old")
+    await repository.update_result(
+        tale.id, status=GenerationStatus.SUCCESS, tale_text="text"
+    )
+    await repository.update_result(
+        video.id, status=GenerationStatus.SUCCESS, video_url="https://cdn/v.mp4"
+    )
+
+    assert await repository.has_completed_tale(909) is True
+
+
+async def test_failed_or_partial_run_keeps_story_available(
+    repository: GenerationRepository,
+) -> None:
+    """Ошибка и частичный результат (статус FAILED) квоту не расходуют."""
+
+    failed = await repository.create_tale(1010)
+    await repository.update_result(
+        failed.id, status=GenerationStatus.FAILED, error="boom"
+    )
+    partial = await repository.create_tale(1010)
+    await repository.update_result(
+        partial.id,
+        status=GenerationStatus.FAILED,
+        tale_text="часть страниц",
+        error="нет картинок",
+    )
+
+    assert await repository.has_completed_tale(1010) is False
+
+
+async def test_in_progress_run_does_not_consume_story(
+    repository: GenerationRepository,
+) -> None:
+    """Идущий прогон квоту ещё не занимает: сказки пока нет."""
+
+    await repository.create_tale(1111)
+
+    assert await repository.has_completed_tale(1111) is False
+
+
+async def test_story_of_another_user_does_not_count(
+    repository: GenerationRepository,
+) -> None:
+    """Чужая успешная сказка не влияет на квоту пользователя."""
+
+    other = await repository.create_tale(1212)
+    await repository.update_result(
+        other.id, status=GenerationStatus.SUCCESS, tale_text="text"
+    )
+
+    assert await repository.has_completed_tale(1313) is False
+
+
 async def test_quota_not_used_with_only_failures(
     repository: GenerationRepository,
 ) -> None:

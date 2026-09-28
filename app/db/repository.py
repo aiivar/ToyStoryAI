@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.engine import Database
@@ -137,6 +137,29 @@ class GenerationRepository:
         async with self._db.session_scope() as session:
             result = await session.execute(statement)
             return result.scalars().all()
+
+    async def has_completed_tale(self, user_id: int) -> bool:
+        """Есть ли у пользователя завершённая сказка (бесплатная квота).
+
+        Отдельный метод от `has_completed_full_generation` не по прихоти:
+        прежний требует ещё и успешного видео, а в новом флоу видео больше
+        нет, поэтому он не выражает правило «одна бесплатная сказка».
+        Старые успешные сказки (прежний формат) этой проверкой тоже
+        засчитываются, как и требовалось.
+
+        Задача 6.2 заменит пару методов на один `has_completed_story`; пока
+        старый метод нужен прежнему коду, удалять его рано.
+        """
+
+        statement = select(func.count()).select_from(Generation).where(
+            Generation.user_id == user_id,
+            Generation.type == GenerationType.TALE,
+            Generation.status == GenerationStatus.SUCCESS,
+        )
+
+        async with self._db.session_scope() as session:
+            result = await session.execute(statement)
+            return bool(result.scalar())
 
     async def has_completed_full_generation(self, user_id: int) -> bool:
         """Израсходована ли бесплатная полная генерация пользователя.
