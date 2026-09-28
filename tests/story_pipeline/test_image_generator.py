@@ -29,6 +29,7 @@ from app.story_pipeline.providers.image import (
     MockImageProvider,
 )
 from app.story_pipeline.stages.image_generator import (
+    CHARACTER_SHEET_ASPECT_RATIO,
     CHARACTER_SHEET_SEED,
     ImageGeneratorStage,
     page_filename,
@@ -136,6 +137,136 @@ async def test_generates_sheet_first_then_pages_with_reference(
     assert metric.attempts == 1
     assert metric.error is None
     assert state.status == "ok"
+
+
+async def test_photo_reference_builds_sheet_and_sheet_builds_pages(
+    tmp_path: Path,
+    fake_image_provider,
+) -> None:
+    """Фото — единственный референс листа, лист — единственный референс страниц."""
+
+    photo = b"photo-bytes"
+    provider = fake_image_provider()
+
+    await ImageGeneratorStage(
+        provider, reference_photo=photo
+    ).run(_state(tmp_path))
+
+    sheet_call = provider.calls[0]
+    page_calls = provider.calls[1:]
+    # Ровно один референс на вызов: фото в лист, лист — в страницы.
+    assert sheet_call["reference_images"] == [photo]
+    for call in page_calls:
+        assert call["reference_images"] == [b"image-0"]
+
+
+async def test_aspect_ratios_differ_between_sheet_and_pages(
+    tmp_path: Path,
+    fake_image_provider,
+) -> None:
+    """Лист персонажей рисуется квадратом, страницы — в пропорции прогона."""
+
+    provider = fake_image_provider()
+
+    await ImageGeneratorStage(
+        provider, aspect_ratio="4:3"
+    ).run(_state(tmp_path))
+
+    assert provider.calls[0]["aspect_ratio"] == CHARACTER_SHEET_ASPECT_RATIO
+    assert [call["aspect_ratio"] for call in provider.calls[1:]] == ["4:3", "4:3"]
+
+
+async def test_files_are_saved_with_extension_of_returned_media_type(
+    tmp_path: Path,
+    fake_image_provider,
+) -> None:
+    """Имя файла следует типу, который вернул провайдер, без конвертации.
+
+    Живая проверка RouterAI отдаёт JPEG, поэтому жёсткое `.png` приводило к
+    файлу с расширением, не совпадающим с содержимым.
+    """
+
+    jpeg = b"\xff\xd8\xff-jpeg-bytes"
+    png = b"\x89PNG\r\n\x1a\n-png-bytes"
+    provider = fake_image_provider(
+        responses=[
+            GeneratedImage(data=jpeg, seed=1, media_type="image/jpeg"),
+            GeneratedImage(data=jpeg, seed=2, media_type="image/jpeg"),
+            GeneratedImage(data=png, seed=3, media_type="image/png"),
+        ]
+    )
+    state = _state(tmp_path)
+
+    await ImageGeneratorStage(provider).run(state)
+
+    # Расширение листа и страниц соответствует типу файла.
+    assert (tmp_path / "character_sheet.jpg").read_bytes() == jpeg
+    assert (tmp_path / "page_1.jpg").read_bytes() == jpeg
+    assert (tmp_path / "page_2.png").read_bytes() == png
+    # Байты не перекодировались, пути в состоянии совпадают с файлами.
+    assert state.character_sheet_path == str(tmp_path / "character_sheet.jpg")
+    assert [art.path for art in state.images] == [
+        str(tmp_path / "page_1.jpg"),
+        str(tmp_path / "page_2.png"),
+    ]
+    assert state.status == "ok"
+
+
+async def test_webp_media_type_maps_to_webp_extension(
+    tmp_path: Path,
+    fake_image_provider,
+) -> None:
+    """WebP от провайдера сохраняется как `.webp`, а не переименовывается."""
+
+    provider = fake_image_provider(
+        responses=[
+            GeneratedImage(data=b"RIFF", seed=1, media_type="image/webp"),
+            GeneratedImage(data=b"RIFF", seed=2, media_type="image/webp"),
+        ]
+    )
+
+    await ImageGeneratorStage(provider).run(_state(tmp_path, num_scenes=1))
+
+    assert (tmp_path / "character_sheet.webp").read_bytes() == b"RIFF"
+    assert (tmp_path / "page_1.webp").read_bytes() == b"RIFF"
+
+
+async def test_missing_media_type_falls_back_to_png_name(
+    tmp_path: Path,
+    fake_image_provider,
+) -> None:
+    """Пустой тип не роняет прогон: имя строится по разумному умолчанию."""
+
+    provider = fake_image_provider(
+        responses=[
+            GeneratedImage(data=b"sheet", seed=1, media_type=""),
+            GeneratedImage(data=b"page", seed=2, media_type="  "),
+        ]
+    )
+    state = _state(tmp_path, num_scenes=1)
+
+    await ImageGeneratorStage(provider).run(state)
+
+    assert (tmp_path / "character_sheet.png").read_bytes() == b"sheet"
+    assert (tmp_path / "page_1.png").read_bytes() == b"page"
+    assert state.status == "ok"
+    assert state.metrics[-1].error is None
+
+
+def test_extension_helpers_map_media_types_without_path_separators() -> None:
+    """Хелперы имени файла устойчивы к пустому и неожиданному типу."""
+
+    assert page_filename(3, "image/jpeg") == "page_3.jpg"
+    assert page_filename(3, "image/webp") == "page_3.webp"
+    assert page_filename(3, "image/png") == "page_3.png"
+    # Тип неизвестен или пуст — безопасное имя без слешей и точек-обманок.
+    assert page_filename(3, None) == "page_3.png"
+    assert page_filename(3, "") == "page_3.png"
+    # Тип вне таблицы: в имя попадает только подтип, служебные символы нет.
+    hostile = page_filename(3, "../../evil")
+    assert "/" not in hostile
+    assert ".." not in hostile
+    assert hostile == "page_3.evil"
 
 
 async def test_page_failure_degrades_to_needs_review(

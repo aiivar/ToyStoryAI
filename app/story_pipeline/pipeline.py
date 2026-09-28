@@ -9,12 +9,19 @@ QualityReviewLoop → ImageGenerator`` из инъектированных за�
 
 Каждый этап получает текущее состояние и обогащает его; вход/выход, время и
 токены пишутся в лог через `log_stage`, а метрики накапливаются самими
-этапами в `state.metrics`.
+этапами в `state.metrics`. Необязательный `on_stage` сообщает имя этапа на
+его границе, чтобы вызывающая сторона могла рассказать пользователю, что
+происходит, и `await`-ится, чтобы сообщение ушло до старта следующего этапа.
+
+Каталог вывода берётся из настроек только если прогон не задал его сам:
+уникальный каталог на прогон (например, у бота) перетирать нельзя, иначе
+параллельные прогоны писали бы файлы в одно место.
 """
 
 from __future__ import annotations
 
 import time
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
 from loguru import logger
@@ -34,9 +41,21 @@ from app.story_pipeline.stages.reviser import ReviserStage
 from app.story_pipeline.stages.scene_breakdown import SceneBreakdownStage
 from app.story_pipeline.stages.screenwriter import ScreenwriterStage
 
+# Асинхронный колбэк прогресса: принимает имя этапа, ничего не возвращает.
+# `Awaitable`, а не `None`: оркестратор ждёт отправку сообщения, иначе
+# «Рисую страницы…» ушло бы уже после того, как рисование началось.
+StageCallback = Callable[[str], Awaitable[None]]
+
 
 class StoryPipeline:
-    """Явный граф этапов сказки с инъектированными провайдерами."""
+    """Явный граф этапов сказки с инъектированными провайдерами.
+
+    `on_stage` — необязательный асинхронный колбэк, которым оркестратор
+    сообщает имя этапа на его границе. Он `await`-ится, поэтому отправитель
+    сообщений успевает дописать «Готовлю сказку…» до старта следующего этапа.
+    Колбэк не тащит в пайплайн знание о мессенджере и по умолчанию
+    отсутствует, поэтому прогон без него ничем не отличается.
+    """
 
     def __init__(
         self,
@@ -45,11 +64,23 @@ class StoryPipeline:
         settings: StorySettings,
         *,
         owns_providers: bool = False,
+        reference_photo: bytes | None = None,
+        on_stage: StageCallback | None = None,
     ) -> None:
+        """Собрать граф этапов над инъектированными провайдерами.
+
+        `reference_photo` — байты фото игрушки, которые прокидываются в этап
+        иллюстрирования как единственный референс character sheet. В
+        `StoryState` фото не попадает: состояние сериализуется в
+        `story.json` и остаётся без бинарных данных, поэтому фото — вход
+        прогона, а не его артефакт. `None` — сценарий без фото (CLI).
+        """
+
         self._llm = llm
         self._image_provider = image_provider
         self._settings = settings
         self._owns_providers = owns_providers
+        self._on_stage = on_stage
         self._stages: list[Stage] = [
             PlannerStage(llm),
             ScreenwriterStage(llm),
@@ -60,7 +91,11 @@ class StoryPipeline:
                 ReviserStage(llm),
                 max_revisions=settings.story_max_revisions,
             ),
-            ImageGeneratorStage(image_provider),
+            ImageGeneratorStage(
+                image_provider,
+                reference_photo=reference_photo,
+                aspect_ratio=settings.story_image_aspect_ratio,
+            ),
         ]
 
     @property
@@ -83,11 +118,18 @@ class StoryPipeline:
         """
 
         state.started_at = datetime.now(timezone.utc)
-        state.output_dir = self._settings.story_output_dir
+        # Каталог из настроек — только запасной вариант: если прогон уже
+        # получил свой каталог (уникальный на бота), перетирать его нельзя,
+        # иначе параллельные прогоны писали бы файлы в одно место.
+        if state.output_dir is None:
+            state.output_dir = self._settings.story_output_dir
         current_stage = "?"
         try:
             for stage in self._stages:
                 current_stage = stage.name
+                # Граница этапа: сообщение о прогрессе уходит и завершается
+                # до старта следующего этапа, иначе отправитель отстал бы.
+                await self._notify_stage(stage.name)
                 await self._run_stage(stage, state)
         except StoryPipelineError as exc:
             state.status = "failed"
@@ -125,6 +167,17 @@ class StoryPipeline:
                     first_error = exc
         if first_error is not None:
             raise first_error
+
+    async def _notify_stage(self, stage_name: str) -> None:
+        """Сообщить о начале этапа, если колбэк передан.
+
+        Вызов `await`-ится намеренно: сообщение пользователю должно уйти
+        до того, как начнётся платная работа этапа. Без колбэка метод —
+        дешёвый no-op, лишних await в прогоне не появляется.
+        """
+
+        if self._on_stage is not None:
+            await self._on_stage(stage_name)
 
     async def _run_stage(self, stage: Stage, state: StoryState) -> None:
         """Выполнить узел, залогировав вход/выход, время и расход токенов."""

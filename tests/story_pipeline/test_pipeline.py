@@ -7,8 +7,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -37,6 +39,7 @@ from app.story_pipeline.models import (
 )
 from app.story_pipeline.observability import log_stage, total_usage
 from app.story_pipeline.pipeline import StoryPipeline
+from app.story_pipeline.providers.image import GeneratedImage
 from app.story_pipeline.providers.llm import Usage
 
 
@@ -174,6 +177,290 @@ async def test_run_fills_state_end_to_end(
     # Один вызов на каждый LLM-этап без ревизий: план, сказка, извлечение,
     # раскадровка, судья.
     assert llm.call_count == 5
+
+
+async def test_pipeline_passes_reference_photo_without_storing_it(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Фото доходит до этапа иллюстрирования, но не остаётся в состоянии."""
+
+    provider = fake_image_provider()
+    photo = b"toy-photo-bytes"
+    pipeline = StoryPipeline(
+        fake_llm(_ok_responses()),
+        provider,
+        story_settings(story_output_dir=str(tmp_path)),
+        reference_photo=photo,
+    )
+    state = _state()
+
+    await pipeline.run(state)
+
+    # Фото ушло единственным референсом в вызов character sheet.
+    assert provider.calls[0]["reference_images"] == [photo]
+    # В состоянии бинарей нет: фото не сериализуется вместе с прогоном.
+    dumped = state.model_dump(mode="json")
+    assert photo.decode() not in str(dumped)
+
+
+async def test_pipeline_applies_configured_page_aspect_ratio(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Пропорция страниц берётся из настроек, лист всегда квадратный."""
+
+    provider = fake_image_provider()
+    pipeline = StoryPipeline(
+        fake_llm(_ok_responses()),
+        provider,
+        story_settings(
+            story_output_dir=str(tmp_path),
+            story_image_aspect_ratio="3:4",
+        ),
+    )
+
+    await pipeline.run(_state())
+
+    assert provider.calls[0]["aspect_ratio"] == "1:1"
+    assert [call["aspect_ratio"] for call in provider.calls[1:]] == ["3:4", "3:4"]
+
+
+async def test_on_stage_reports_every_stage_in_order(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Колбэк видит имена этапов прогона в каноническом порядке."""
+
+    reported: list[str] = []
+
+    async def on_stage(name: str) -> None:
+        reported.append(name)
+
+    pipeline = StoryPipeline(
+        fake_llm(_ok_responses()),
+        fake_image_provider(),
+        story_settings(story_output_dir=str(tmp_path)),
+        on_stage=on_stage,
+    )
+
+    await pipeline.run(_state())
+
+    assert reported == [stage.name for stage in pipeline.stages]
+    assert "quality" in reported
+
+
+async def test_on_stage_completes_before_next_stage_starts(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Оркестратор дожидается колбэка: следующий этап стартует после него.
+
+    Регрессия на исходный дефект синхронного вызова: отправитель писал бы
+    «Рисую страницы…» в уже идущем фоне, и пользователь видел бы сообщение
+    не вовремя. Отметка ставится после `await sleep`, то есть момент
+    завершения отправки.
+    """
+
+    events: list[str] = []
+    inner_llm = fake_llm(_ok_responses())
+
+    class _RecordingLLM:
+        """Прокси `LLMClient`, фиксирующий момент вызова каждой стадии LLM."""
+
+        async def complete_json(self, **kwargs: Any) -> tuple[Any, Any]:
+            events.append("llm")
+            return await inner_llm.complete_json(**kwargs)
+
+    async def on_stage(name: str) -> None:
+        events.append(f"notify-start:{name}")
+        await asyncio.sleep(0)
+        events.append(f"notify-done:{name}")
+
+    pipeline = StoryPipeline(
+        _RecordingLLM(),  # type: ignore[arg-type]
+        fake_image_provider(),
+        story_settings(story_output_dir=str(tmp_path)),
+        on_stage=on_stage,
+    )
+
+    await pipeline.run(_state())
+
+    # Все шесть этапов уведомили о себе, в порядке графа.
+    order = [event for event in events if event.startswith("notify-done:")]
+    assert order == [
+        f"notify-done:{name}"
+        for name in (
+            "plan",
+            "script",
+            "extract",
+            "scene",
+            "quality",
+            "illustrate",
+        )
+    ]
+    # Работа LLM каждого этапа идёт строго после завершения уведомления
+    # о нём: непосредственно перед вызовом стоит `notify-done` этого этапа.
+    # Без `await` в оркестраторе уведомление «наезжало» бы на этап.
+    before_llm = [
+        events[index - 1]
+        for index, event in enumerate(events)
+        if event == "llm"
+    ]
+    assert before_llm == [
+        "notify-done:plan",
+        "notify-done:script",
+        "notify-done:extract",
+        "notify-done:scene",
+        "notify-done:quality",
+    ]
+
+
+async def test_run_without_callback_is_unchanged(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Без колбэка прогон идёт как раньше: `on_stage` не передан."""
+
+    pipeline = StoryPipeline(
+        fake_llm(_ok_responses()),
+        fake_image_provider(),
+        story_settings(story_output_dir=str(tmp_path)),
+    )
+    state = _state()
+
+    result = await pipeline.run(state)
+
+    # Прогон без колбэка даёт тот же результат, что и раньше.
+    assert result is state
+    assert state.status == "ok"
+    assert [art.page_num for art in state.images] == [1, 2]
+
+
+async def test_run_keeps_output_dir_given_in_state(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Явно заданный каталог прогона не перетирается значением настроек.
+
+    Регрессия на исходный дефект: `run()` безусловно писал
+    `state.output_dir = story_output_dir`, из-за чего два параллельных
+    прогона складывали `page_1.png` в один каталог, а лист персонажей мог
+    перезаписаться между генерацией листа и страниц.
+    """
+
+    run_dir = tmp_path / "run-42"
+    pipeline = StoryPipeline(
+        fake_llm(_ok_responses()),
+        fake_image_provider(),
+        story_settings(story_output_dir=str(tmp_path / "default")),
+    )
+    state = _state()
+    state.output_dir = str(run_dir)
+
+    await pipeline.run(state)
+
+    assert state.output_dir == str(run_dir)
+    assert (run_dir / "page_1.png").is_file()
+    assert not (tmp_path / "default").exists()
+
+
+async def test_two_runs_with_own_directories_do_not_clobber(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Два прогона с разными каталогами пишут файлы независимо друг от друга."""
+
+    first_dir = tmp_path / "user-1-1700000000"
+    second_dir = tmp_path / "user-2-1700000001"
+
+    # Разный контент у прогонов: иначе перетирание файлов не отличить
+    # от корректного прогона, потому что имена у обоих наборов одинаковы.
+    first_provider = fake_image_provider(
+        responses=[
+            GeneratedImage(data=b"sheet-one", seed=1),
+            GeneratedImage(data=b"page-one", seed=2),
+            GeneratedImage(data=b"page-two", seed=3),
+        ]
+    )
+    second_provider = fake_image_provider(
+        responses=[
+            GeneratedImage(data=b"sheet-two", seed=11),
+            GeneratedImage(data=b"page-three", seed=12),
+            GeneratedImage(data=b"page-four", seed=13),
+        ]
+    )
+    first = StoryPipeline(
+        fake_llm(_ok_responses()),
+        first_provider,
+        story_settings(story_output_dir=str(first_dir)),
+    )
+    second = StoryPipeline(
+        fake_llm(_ok_responses()),
+        second_provider,
+        story_settings(story_output_dir=str(second_dir)),
+    )
+    first_state = _state()
+    second_state = _state()
+
+    await first.run(first_state)
+    await second.run(second_state)
+
+    assert first_state.output_dir == str(first_dir)
+    assert second_state.output_dir == str(second_dir)
+    # Каждый каталог содержит ровно файлы своего прогона: оба набора
+    # одинаковы по именам, поэтому перетирание видно только по содержимому.
+    expected_names = ["character_sheet.png", "page_1.png", "page_2.png"]
+    assert sorted(path.name for path in first_dir.iterdir()) == expected_names
+    assert sorted(path.name for path in second_dir.iterdir()) == expected_names
+    for run_dir, sheet_bytes, page_bytes, page2_bytes in (
+        (first_dir, b"sheet-one", b"page-one", b"page-two"),
+        (second_dir, b"sheet-two", b"page-three", b"page-four"),
+    ):
+        # Каждая картинка принадлежит своему прогону по содержимому.
+        assert (run_dir / "page_1.png").read_bytes() == page_bytes
+        assert (run_dir / "page_2.png").read_bytes() == page2_bytes
+        assert (run_dir / "character_sheet.png").read_bytes() == sheet_bytes
+    assert [art.path for art in first_state.images] == [
+        str(first_dir / "page_1.png"),
+        str(first_dir / "page_2.png"),
+    ]
+
+
+async def test_output_dir_falls_back_to_settings_when_not_set(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Каталог из настроек применяется, только если он не задан явно."""
+
+    pipeline = StoryPipeline(
+        fake_llm(_ok_responses()),
+        fake_image_provider(),
+        story_settings(story_output_dir=str(tmp_path)),
+    )
+    state = _state()
+    assert state.output_dir is None
+
+    await pipeline.run(state)
+
+    assert state.output_dir == str(tmp_path)
+    assert (tmp_path / "page_1.png").is_file()
 
 
 async def test_metrics_cover_every_stage_of_the_run(

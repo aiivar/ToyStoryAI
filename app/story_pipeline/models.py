@@ -176,7 +176,9 @@ class PageArt(BaseModel):
     """Готовое изображение страницы: путь и seed, без бинарных данных."""
 
     page_num: int = Field(ge=1, description="Номер страницы, начиная с 1.")
-    path: str = Field(description="Путь к PNG-файлу страницы.")
+    path: str = Field(
+        description="Путь к файлу страницы; расширение по типу файла."
+    )
     seed: int | None = Field(
         default=None, description="Seed генерации, если провайдер его вернул."
     )
