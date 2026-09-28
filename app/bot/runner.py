@@ -257,7 +257,9 @@ class StoryRunner:
             return False
 
         task = asyncio.create_task(self._run_guarded(request))
-        run = _ActiveRun(task=task, chat_id=request.chat_id, tale_id=request.tale_id)
+        run = _ActiveRun(
+            task=task, chat_id=request.chat_id, tale_id=request.tale_id
+        )
         self._runs[request.user_id] = run
         task.add_done_callback(
             lambda finished, user_id=request.user_id: self._finish(
@@ -302,7 +304,9 @@ class StoryRunner:
             description = await self._vision.describe(request.photo)
         except Exception as exc:  # noqa: BLE001 - сеть и LLM любят удивлять
             logger.error("Распознавание игрушки не удалось: {}", exc)
-            await self._record(request, status=GenerationStatus.FAILED, error=str(exc))
+            await self._record(
+                request, status=GenerationStatus.FAILED, error=str(exc)
+            )
             await send(VISION_FAILED, [build_restart_keyboard().as_markup()])
             return
 
@@ -461,9 +465,11 @@ class StoryRunner:
         try:
             await send(title, [attachment])
         except Exception as exc:  # noqa: BLE001 - загрузка файла в MAX
-            logger.warning("Не удалось отправить страницу {}: {}", page_num, exc)
-            # Текст страницы уже ушёл? Нет: отправка упала целиком, поэтому
-            # повторяем без вложения, чтобы родитель не потерял текст.
+            logger.warning(
+                "Не удалось отправить страницу {}: {}", page_num, exc
+            )
+            # Отправка упала целиком, текст до пользователя не дошёл, поэтому
+            # повторяем без вложения — иначе родитель потерял бы страницу.
             await send(f"{title}\n\n{PAGE_WITHOUT_IMAGE}")
 
     # --- Внутренняя реализация -------------------------------------------
