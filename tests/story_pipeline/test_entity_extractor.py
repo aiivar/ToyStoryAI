@@ -35,6 +35,13 @@ def _state() -> StoryState:
     )
 
 
+# Описание игрушки-героя: в этом прогоне оно едет в `theme` (D2), отдельное
+# поле состояния появится в задаче 4.3.
+TOY_DESCRIPTION = (
+    "Плюшевый медвежонок: коричневый, мягкий плюш, заплатка на левом ухе."
+)
+
+
 def _registry() -> ExtractedEntities:
     """Реестр сущностей, который «вернёт» модель."""
 
@@ -109,3 +116,32 @@ async def test_entity_extractor_prompt_requests_verifiable_anchors(
     assert "материал" in user
     # Схема берётся из модели, а не задаётся руками.
     assert "$defs" in user
+
+
+async def test_entity_extractor_prompt_forbids_inventing_appearance(
+    fake_llm,
+) -> None:
+    """Промпт экстрактора получает описание героя и запрет выдумывать вид.
+
+    Описание игрушки — единственный источник правды об облике: если
+    экстрактор додумает цвет или наряд, иллюстрации разойдутся с фото, по
+    которому родитель их узнаёт.
+    """
+
+    llm = fake_llm([_registry()])
+    stage = EntityExtractorStage(llm)
+    state = _state()
+    state.theme = f"Сказка про игрушку: {TOY_DESCRIPTION}"
+
+    await stage.run(state)
+
+    user = llm.calls[0]["user"]
+    # Описание доходит до экстрактора дословно.
+    assert TOY_DESCRIPTION in user
+    # Запрет выдумывать внешность назван явно, с полями описания.
+    assert "не выдумывай" in user
+    for field in ("appearance", "clothing", "distinguishing_features"):
+        assert field in user
+    # Наряд и цвет берутся из описания, а не из воли модели.
+    assert "наряд" in user
+    assert "цвет" in user

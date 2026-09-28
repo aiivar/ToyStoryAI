@@ -33,8 +33,12 @@ class EntityExtractorStage:
         """Запросить реестр по схеме `ExtractedEntities` и записать в состояние."""
 
         started = time.perf_counter()
+        # Пока у состояния нет отдельного поля (задача 4.3), описание
+        # игрушки приходит в `theme`: бот формирует тему как «описание
+        # игрушки + мораль + возраст».
         user = EXTRACTOR_USER.format(
             pages=format_pages(state.pages),
+            toy_description=state.theme,
             schema=render_schema(ExtractedEntities),
         )
         entities, usage = await self._llm.complete_json(

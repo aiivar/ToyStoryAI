@@ -24,6 +24,14 @@ def _state() -> StoryState:
     )
 
 
+# Описание игрушки, которое бот кладёт в `theme` (D2/D18): короткая сводка
+# от `ToyVisionService`, именно она делает планировщика первым потребителем
+# описания.
+TOY_DESCRIPTION = (
+    "Плюшевый медвежонок: коричневый, мягкий плюш, красный шарф на шее."
+)
+
+
 def _brief() -> StoryBrief:
     """Заготовка брифа, которую «вернёт» модель."""
 
@@ -81,3 +89,26 @@ async def test_planner_prompt_carries_inputs_and_rendered_schema(
     assert metric.prompt_tokens == 11
     assert metric.completion_tokens == 22
     assert metric.duration_ms >= 0
+
+
+async def test_planner_prompt_pins_hero_to_toy_in_theme(fake_llm) -> None:
+    """Промпт планировщика получает описание игрушки и запрет подмены героя.
+
+    Продуктовое требование: картинки рисуются по фото игрушки, поэтому план
+    обязан строить историю именно про неё. Без запрета LLM спокойно сделает
+    героем лисёнка, и ребёнку покажут чужого персонажа.
+    """
+
+    llm = fake_llm([_brief()])
+    stage = PlannerStage(llm)
+    state = _state()
+    state.theme = f"Сказка про игрушку: {TOY_DESCRIPTION}"
+
+    await stage.run(state)
+
+    user = llm.calls[0]["user"]
+    # Описание игрушки доходит до планировщика дословно.
+    assert TOY_DESCRIPTION in user
+    # Запрет подмены героя сформулирован явно.
+    assert "Не подменяй" in user
+    assert "описана в теме" in user
