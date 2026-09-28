@@ -304,13 +304,16 @@ async def test_second_story_is_refused_by_quota(database: Database) -> None:
         FakeMessageCallback("age:5", message=FakeMessage()), context
     )
     await registered.callback(
-        FakeMessageCallback("moral:2", message=FakeMessage()), context
+        moral_event := FakeMessageCallback("moral:2", message=FakeMessage()),
+        context,
     )
     await registered.runs.wait_idle()
 
     # Пайплайн не запускался: платный вызов не оплачен впустую.
     assert second_pipeline.calls == []
-    assert runner_module.FREE_LIMIT_REACHED in second_sender.sent_texts
+    # Отказ пришёл на нажатие вместо обещания «Запускаю сказку!».
+    assert moral_event.sent_texts == [runner_module.FREE_LIMIT_REACHED]
+    assert handlers_module.GENERATION_STARTED not in second_sender.sent_texts
     # Второй прогон закрыт как не начавшийся, а не остался «в работе».
     history = await repository.get_history(1)
     assert [record.status for record in history] == [

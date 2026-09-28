@@ -491,15 +491,15 @@ async def test_moral_without_photo_resets_dialog(
     assert pipeline.calls == []
 
 
-async def test_used_story_is_not_generated_again(
+async def test_quota_refusal_replaces_the_generation_promise(
     settings: Settings,
     repository: GenerationRepository,
     storage: PhotoStorage,
 ) -> None:
-    """Пользователь с готовой сказкой получает предложение подписки.
+    """Отказ по квоте приходит вместо «Запускаю сказку!».
 
-    Проверка идёт в фоновой задаче, до распознавания и пайплайна: обе операции
-    платные, и запускать их израсходованному пользователю незачем.
+    Проверка стоит в обработчике, до отправки обещания: иначе весь старый
+    пользовательский состав видел сначала обещание, а следом отказ.
     """
 
     tale = await repository.create_tale(1)
@@ -508,14 +508,12 @@ async def test_used_story_is_not_generated_again(
     )
 
     sender = FakeSender()
-    vision = FakeVision()
     pipeline = FakePipeline()
     registered, _ = _register(
         settings,
         repository,
         storage,
         sender=sender,
-        vision=vision,
         pipeline=pipeline,
         download_photo=_photo_download(make_photo_bytes(400, 400)),
     )
@@ -523,15 +521,48 @@ async def test_used_story_is_not_generated_again(
     await _prepare_dialog(registered, context)
     await registered.callback(FakeMessageCallback("age:4"), context)
 
-    await registered.callback(FakeMessageCallback("moral:0"), context)
+    event = FakeMessageCallback("moral:0")
+    await registered.callback(event, context)
     await registered.runs.wait_idle()
 
-    assert sender.sent_texts == [runner_module.FREE_LIMIT_REACHED]
-    assert keyboard_labels(sender.sent[0].attachments) == [
-        ["Оформить подписку"]
-    ]
-    assert vision.photos == []
+    assert event.sent_texts == [runner_module.FREE_LIMIT_REACHED]
+    assert handlers_module.GENERATION_STARTED not in sender.sent_texts
     assert pipeline.calls == []
+    # Запись о прогоне закрыта, а не осталась «в работе» навсегда.
+    history = await repository.get_history(1)
+    assert history[0].status is GenerationStatus.FAILED
+    assert "квота" in (history[0].error or "")
+
+
+async def test_quota_refusal_offers_subscription_button(
+    settings: Settings,
+    repository: GenerationRepository,
+    storage: PhotoStorage,
+) -> None:
+    """Отказ по квоте приходит с кнопкой подписки, и она работает."""
+
+    tale = await repository.create_tale(1)
+    await repository.update_result(
+        tale.id, status=GenerationStatus.SUCCESS, tale_text="Старая сказка"
+    )
+
+    pipeline = FakePipeline()
+    registered, _ = _register(
+        settings,
+        repository,
+        storage,
+        pipeline=pipeline,
+        download_photo=_photo_download(make_photo_bytes(400, 400)),
+    )
+    context = FakeContext(state=StoryFlow.waiting_photo)
+    await _prepare_dialog(registered, context)
+    await registered.callback(FakeMessageCallback("age:4"), context)
+
+    event = FakeMessageCallback("moral:0")
+    await registered.callback(event, context)
+    await registered.runs.wait_idle()
+
+    assert keyboard_labels(event.sent[0].attachments) == [["Оформить подписку"]]
 
     stub = FakeMessageCallback("subscribe", message=FakeMessage())
     await registered.callback(stub, context)

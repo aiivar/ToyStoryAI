@@ -34,7 +34,13 @@ from app.bot.keyboards import (
     parse_moral_payload,
 )
 from app.bot.messaging import ChatSender
-from app.bot.runner import PipelineFactory, RunRequest, StoryRunner
+from app.bot.runner import (
+    FREE_LIMIT_REACHED,
+    QUOTA_REFUSAL_ERROR,
+    PipelineFactory,
+    RunRequest,
+    StoryRunner,
+)
 from app.bot.states import StoryFlow
 from app.config import Settings
 from app.db.repository import GenerationRepository
@@ -459,6 +465,25 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
             age=age,
             moral=moral,
         )
+        # Квота проверяется здесь, до обещания «Запускаю сказку!»: отказ,
+        # пришедший следом за обещанием, для всего старого состава
+        # пользователей выглядел как сломанный бот. Проверка остаётся и в
+        # раннере (`run`/`has_quota`) — это то, что гарантирует отсутствие
+        # платного вызова, если сюда дойти в обход обработчика.
+        if await runs.has_quota(user_id):
+            logger.info(
+                "Квота пользователя {} израсходована, прогон не запускаю", user_id
+            )
+            await _callback_send(
+                event,
+                FREE_LIMIT_REACHED,
+                [build_subscription_keyboard().as_markup()],
+            )
+            await runs.record_quota_refusal(request)
+            await context.clear()
+            await context.set_state(StoryFlow.waiting_photo)
+            return
+
         if not runs.start(request):
             await _callback_send(event, ALREADY_RUNNING)
             return
