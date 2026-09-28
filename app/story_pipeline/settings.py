@@ -67,30 +67,6 @@ class StorySettings(BaseSettings):
         ),
     )
 
-    # --- Gemini (генерация изображений) --------------------------------
-    gemini_api_key: str = Field(
-        default="",
-        description=(
-            "API-ключ Gemini. Пустое значение включает MockImageProvider "
-            "и исключает платные вызовы."
-        ),
-    )
-    gemini_base_url: str = Field(
-        default="https://generativelanguage.googleapis.com",
-        description="Базовый URL Gemini API.",
-    )
-    gemini_model: str = Field(
-        default="gemini-3.1-flash-image",
-        description=(
-            "Модель генерации изображений Gemini — Nano Banana 2 "
-            "(семейство Gemini 3.1 Flash Image)."
-        ),
-    )
-    gemini_timeout: float = Field(
-        default=120.0,
-        description="Таймаут HTTP-запроса к Gemini в секундах.",
-    )
-
     # --- RouterAI (генерация изображений) ------------------------------
     routerai_api_key: str = Field(
         default="",

@@ -39,24 +39,6 @@ class GenerationRepository:
             tale_text=tale_text,
         )
 
-    async def create_video(
-        self,
-        user_id: int,
-        *,
-        request_id: str | None = None,
-        status: GenerationStatus = GenerationStatus.IN_PROGRESS,
-        local_path: str | None = None,
-    ) -> Generation:
-        """Создать запись о видео с идентификатором запроса провайдера."""
-
-        return await self._create(
-            user_id=user_id,
-            generation_type=GenerationType.VIDEO,
-            status=status,
-            local_path=local_path,
-            kling_request_id=request_id,
-        )
-
     async def _create(
         self,
         *,
@@ -65,7 +47,6 @@ class GenerationRepository:
         status: GenerationStatus,
         local_path: str | None = None,
         tale_text: str | None = None,
-        kling_request_id: str | None = None,
     ) -> Generation:
         async with self._db.session_scope() as session:
             generation = Generation(
@@ -74,7 +55,6 @@ class GenerationRepository:
                 status=status,
                 local_path=local_path,
                 tale_text=tale_text,
-                kling_request_id=kling_request_id,
             )
             session.add(generation)
             await session.commit()
@@ -87,7 +67,6 @@ class GenerationRepository:
         *,
         status: GenerationStatus,
         tale_text: str | None = None,
-        video_url: str | None = None,
         error: str | None = None,
         pages_count: int | None = None,
         output_dir: str | None = None,
@@ -108,8 +87,6 @@ class GenerationRepository:
             generation.status = status
             if tale_text is not None:
                 generation.tale_text = tale_text
-            if video_url is not None:
-                generation.video_url = video_url
             if error is not None:
                 generation.error = error
             if pages_count is not None:
@@ -133,11 +110,21 @@ class GenerationRepository:
         *,
         limit: int | None = None,
     ) -> Sequence[Generation]:
-        """История пользователя от новых записей к старым."""
+        """История сказок пользователя от новых записей к старым.
+
+        Отбор по `type == TALE` сделан прямо в SQL не из вкуса, а по
+        необходимости: в базах прежнего флоу остались строки `type = 'video'`,
+        а `GenerationType` их больше не знает, и загрузка такой строки в ORM
+        упала бы с `LookupError`. Такие строки относятся к удалённой
+        функции, поэтому в истории сказок им не место.
+        """
 
         statement = (
             select(Generation)
-            .where(Generation.user_id == user_id)
+            .where(
+                Generation.user_id == user_id,
+                Generation.type == GenerationType.TALE,
+            )
             .order_by(Generation.created_at.desc(), Generation.id.desc())
         )
         if limit is not None:

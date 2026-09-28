@@ -1,14 +1,13 @@
-"""Сохранение принятых фото и подготовка base64 для видеопровайдера."""
+"""Сохранение принятых фото и чтение их для фоновой генерации."""
 
 from __future__ import annotations
 
-import base64
 from pathlib import Path
 from uuid import uuid4
 
 
 class PhotoStorageError(Exception):
-    """Не удалось сохранить фото или закодировать его в base64."""
+    """Не удалось сохранить или прочитать фото."""
 
     def __init__(self, user_message: str, *, reason: str) -> None:
         super().__init__(user_message)
@@ -77,37 +76,6 @@ class PhotoStorage:
                 reason="empty",
             )
         return data
-
-    def encode_base64(self, path: str | Path) -> str:
-        """Прочитать сохранённый файл и закодировать его в base64.
-
-        Поднимает `PhotoStorageError` при ошибке чтения или кодирования,
-        чтобы вызывающий код не отправлял провайдеру некорректный запрос.
-        """
-
-        file_path = Path(path)
-        try:
-            data = file_path.read_bytes()
-        except OSError as exc:
-            raise PhotoStorageError(
-                "Не удалось прочитать сохранённое фото, поэтому видео "
-                "сейчас недоступно.",
-                reason="read",
-            ) from exc
-
-        if not data:
-            raise PhotoStorageError(
-                "Сохранённое фото пустое, поэтому видео сейчас недоступно.",
-                reason="empty",
-            )
-
-        try:
-            return base64.b64encode(data).decode("ascii")
-        except (ValueError, UnicodeError) as exc:  # pragma: no cover
-            raise PhotoStorageError(
-                "Не удалось закодировать фото для видео.",
-                reason="encode",
-            ) from exc
 
 
 __all__ = ["PhotoStorage", "PhotoStorageError"]

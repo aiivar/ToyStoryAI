@@ -109,9 +109,9 @@ python -m app.story_pipeline \
 
 ### Режимы изображений
 
-- **Реальный режим** требует `GEMINI_API_KEY`: иллюстрации рисует Gemini
-  (`GEMINI_MODEL`, по умолчанию Nano Banana 2).
-- **Mock-режим** включается автоматически при пустом `GEMINI_API_KEY`:
+- **Реальный режим** требует `ROUTERAI_API_KEY`: иллюстрации рисует RouterAI
+  (`ROUTERAI_IMAGE_MODEL`).
+- **Mock-режим** включается автоматически при пустом `ROUTERAI_API_KEY`:
   `MockImageProvider` отдаёт детерминированные PNG без сети и расходов.
   Текст сказки при этом всё равно генерирует живой DeepSeek, поэтому
   `DEEPSEEK_API_KEY` нужен в любом режиме: пустой ключ — понятная ошибка до
@@ -145,7 +145,7 @@ python -m app.story_pipeline \
 - Текстовые этапы — несколько вызовов DeepSeek за прогон (планировщик,
   сценарист, экстрактор, раскадровщик, судья; плюс ревизор при провале).
 - Изображения — `N + 1` генераций за прогон (лист персонажей и по одной на
-  страницу). Это основная стоимость; пустой `GEMINI_API_KEY` убирает её
+  страницу). Это основная стоимость; пустой `ROUTERAI_API_KEY` убирает её
   полностью.
 - `--pages` ограничен диапазоном `STORY_PAGES_MIN..STORY_PAGES_MAX`, чтобы
   не запустить неограниченный путь расходов.
@@ -179,12 +179,10 @@ output/20260927-103000/
 
 - **Mock-режим** строит PNG именно из seed, поэтому страницы не совпадают
   байт-в-байт, а `seed` в `story.json` заполнен.
-- **Реальный режим:** провайдер `generateContent` **не поддерживает** seed, и
-  `GeminiImageProvider` возвращает `seed = null` — поле остаётся пустым, а
-  воспроизводимость картинок провайдером не гарантируется. Это осознанно:
-  выдумывать seed, которого не было, было бы враньём в артефакте прогона.
-  Значения seed полезны при отладке и в mock-режиме, а не как способ
-  перегенерировать те же байты у Gemini.
+- **Реальный режим:** воспроизводимость картинок провайдером не
+  гарантируется — поле `seed` может остаться пустым, если провайдер его не
+  поддерживает. Выдумывать seed, которого не было, было бы враньём в
+  артефакте прогона. Значения seed полезны при отладке и в mock-режиме.
 
 Прогон не может завершиться со статусом `ok`, если PNG какой-то страницы не
 написан: этап сверяет фактические файлы с `1..num_pages` и переводит прогон
@@ -205,7 +203,7 @@ output/20260927-103000/
   `DEEPSEEK_API_KEY`; изображения принудительно мокаются, так как метрике
   нужны только вердикты судьи. Без ключа тест пропускается.
 - **Визуальная узнаваемость персонажа (критерий №2) — ручной шаг:**
-  1. задайте реальные `DEEPSEEK_API_KEY` и `GEMINI_API_KEY`;
+  1. задайте реальные `DEEPSEEK_API_KEY` и `ROUTERAI_API_KEY`;
   2. выполните реальный прогон:
      `python -m app.story_pipeline --theme "..." --age 5 --moral "..." --pages 6`;
   3. откройте `output/{timestamp}/character_sheet.*` и все `page_*.*`;
@@ -233,10 +231,6 @@ cp .env.example .env
 | `DEEPSEEK_MODEL` | Модель сказки | `deepseek-flash` |
 | `DEEPSEEK_TIMEOUT` | Таймаут HTTP-запроса к DeepSeek, с | `60` |
 | `DEEPSEEK_MAX_TOKENS` | Лимит токенов ответа (включая размышления reasoning-модели) | `4096` |
-| `GEMINI_API_KEY` | Ключ Gemini для иллюстраций; пусто = mock | пусто |
-| `GEMINI_BASE_URL` | Базовый URL Gemini API | `https://generativelanguage.googleapis.com` |
-| `GEMINI_MODEL` | Модель генерации изображений | `gemini-3.1-flash-image` |
-| `GEMINI_TIMEOUT` | Таймаут HTTP-запроса к Gemini, с | `120` |
 | `ROUTERAI_API_KEY` | Ключ RouterAI для иллюстраций; пусто = mock | пусто |
 | `ROUTERAI_BASE_URL` | Базовый URL API RouterAI | `https://routerai.ru/api/v1` |
 | `ROUTERAI_IMAGE_MODEL` | Модель генерации изображений в RouterAI | `google/gemini-3.1-flash-lite-image` |
@@ -352,7 +346,7 @@ app/
     errors.py             # контракт ошибок пайплайна
     observability.py      # логирование этапов и суммарный расход токенов
     stages/               # этапы графа: plan → script → extract → scene → quality → illustrate
-    providers/            # LLM (DeepSeek) и изображения (RouterAI/Gemini/Mock)
+    providers/            # LLM (DeepSeek) и изображения (RouterAI/Mock)
     pipeline.py           # оркестратор явного графа этапов
     cli.py                # командный интерфейс
     __main__.py           # точка входа `python -m app.story_pipeline`
