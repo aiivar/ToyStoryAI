@@ -17,6 +17,7 @@ from app.story_pipeline.prompts import (
     EXTRACTOR_USER,
     format_pages,
     format_toy_description,
+    render_answer_format,
 )
 from app.story_pipeline.providers.llm import LLMClient, render_schema
 
@@ -40,6 +41,7 @@ class EntityExtractorStage:
             pages=format_pages(state.pages),
             toy_description=format_toy_description(state.toy_description),
             schema=render_schema(ExtractedEntities),
+            answer_format=render_answer_format(ExtractedEntities),
         )
         entities, usage = await self._llm.complete_json(
             system=EXTRACTOR_SYSTEM,

@@ -30,6 +30,7 @@ from app.story_pipeline.prompts import (
     REVISER_USER,
     format_issues,
     format_scene_pages,
+    render_answer_format,
 )
 from app.story_pipeline.providers.llm import LLMClient, render_schema
 from app.story_pipeline.stages.judge import validate_judge_verdict
@@ -104,6 +105,7 @@ class ReviserStage:
                 [page for page in state.pages if page.page_num in problem_set],
             ),
             schema=render_schema(RevisionPayload),
+            answer_format=render_answer_format(RevisionPayload),
         )
         payload, usage = await self._llm.complete_json(
             system=REVISER_SYSTEM,

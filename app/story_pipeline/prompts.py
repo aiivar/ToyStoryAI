@@ -1,15 +1,26 @@
 """Централизованные промпты пайплайна сказок.
 
-Здесь живут все обращения к языковой модели — и целиком, и по кускам: шаблоны
+Здесь живут все обращения к языковой модели — и целиком, и по кучкам: шаблоны
 этапов, корректирующий промпт LLM-клиента, формулировки проблем, которые
 валидаторы подставляют в перезапросы. Промпты не размещаются в модулях
 этапов или ином коде: правка формулировки локализуется в этом файле.
+
+Здесь же собирается строгая форма ответа (`render_answer_format`): список
+полей и пример-заготовка выводятся из той же pydantic-модели, которую рендерит
+`render_schema`, поэтому инструкция не может разойтись с контрактом этапа.
 
 Инвариант проверяется тестом
 `tests/story_pipeline/test_prompts_centralization.py`.
 """
 
 from __future__ import annotations
+
+import json
+import types
+from typing import Any, Literal, Union, get_args, get_origin
+
+from pydantic import BaseModel
+from pydantic.fields import FieldInfo
 
 from app.story_pipeline.models import (
     ExtractedEntities,
@@ -23,6 +34,130 @@ from app.story_pipeline.models import (
 # изображения как якорь визуальной согласованности между страницами.
 ART_STYLE_DEFAULT = "soft watercolor storybook illustration"
 
+
+# --- Строгая форма ответа ------------------------------------------------
+#
+# Живой прогон вскрыл системный баг: если промпт заканчивается сырой
+# JSON-схемой, модель копирует СЛУЖЕБНЫЕ ключи самой схемы (`description`,
+# `properties`, `required`, иногда `type`/`title`) как форму ответа. Судья
+# вернул `{"description": …, "properties": {…}}` вместо
+# `{"passed": …, "issues": […]}`; корректирующий повтор клиента не помог.
+# Содержание вердикта при этом было качественным — сломана была форма.
+#
+# Поэтому каждый промпт, запрашивающий JSON, заканчивается не только схемой,
+# но и явной инструкцией о форме: имена верхнеуровневых полей, запрет служебных
+# ключей и короткий пример-заготовка. Всё это генерируется из pydantic-модели
+# (`render_answer_format`), ручных списков полей нет — при добавлении поля в
+# модель инструкция обновляется сама.
+
+# Служебные ключи JSON-схемы: описывают схему, а не данные, поэтому в ответе
+# модели их быть не должно.
+SCHEMA_META_KEYS = ("description", "properties", "required", "type", "title")
+
+# Маркер начала примера-заготовки в тексте инструкции. Отдельная константа,
+# а не часть шаблона: тесты ищут по ней JSON-пример в собранном промпте.
+ANSWER_EXAMPLE_LABEL = "Пример-заготовка правильного ответа:"
+
+# Плейсхолдеры: fields (имена верхнеуровневых полей через запятую),
+# meta_keys (служебные ключи схемы в обратных кавычках), label (маркер
+# примера), example (JSON-заготовка одним объектом).
+ANSWER_FORMAT = (
+    "СТРОГАЯ ФОРМА ОТВЕТА (это обязательно и важнее самой схемы):\n"
+    "- верни JSON-объект РОВНО с этими верхнеуровневыми ключами: {fields};\n"
+    "- ключи {meta_keys} — служебные ключи самой JSON-схемы, а не данные: "
+    "в ответе их использовать НЕЛЬЗЯ;\n"
+    "- {label} {example} — это заготовка ФОРМЫ, подставь вместо неё свои "
+    "значения.\n"
+    "Других ключей не добавляй, markdown-обёрток и пояснений не пиши."
+)
+
+
+def _skeleton_value(annotation: Any, field_name: str) -> Any:
+    """Собрать значение-заготовку одного поля по его аннотации.
+
+    Заготовка должна быть валидна самой моделью: иначе пример в промпте врал бы
+    о форме контракта, а тест, проверяющий `model_validate` примера, падал бы
+    на ровном месте. Поэтому ограничения (`ge`) учитываются, а не игнорируются.
+    """
+
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+
+    # `X | None` и `Optional[X]`: берём непустой вариант, иначе пример был бы
+    # `null` и модель копировала бы пустоту вместо формы.
+    if origin is Union or origin is types.UnionType:
+        non_none = [arg for arg in args if arg is not type(None)]
+        if non_none:
+            return _skeleton_value(non_none[0], field_name)
+        return None
+    if origin is Literal:
+        return args[0] if args else None
+    if origin in (list, set, tuple):
+        # Список ответа показываем одним элементом: пустой список модель
+        # принимает за «содержимое отсутствует» и возвращает его дословно.
+        item = args[0] if args else str
+        return [_skeleton_value(item, field_name)]
+    if origin is dict:
+        return {}
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return _skeleton_object(annotation)
+    if annotation is bool:
+        return False
+    if annotation is int:
+        return 1
+    if annotation is float:
+        return 0.0
+    if annotation is str:
+        return "..."
+    return None
+
+
+def _min_allowed_int(field: FieldInfo) -> int:
+    """Наименьшее целое, допустимое полем: `1`, если ограничений нет.
+
+    `page_num` объявлен как `ge=1`, поэтому заготовка `0` не прошла бы
+    `model_validate` и инструкция показывала бы модели невалидный ответ.
+    """
+
+    for constraint in field.metadata:
+        ge = getattr(constraint, "ge", None)
+        if isinstance(ge, int):
+            return max(ge, 1)
+    return 1
+
+
+def _skeleton_object(model: type[BaseModel]) -> dict[str, Any]:
+    """Собрать объект-заготовку верхнего уровня по полям pydantic-модели."""
+
+    skeleton: dict[str, Any] = {}
+    for name, field in model.model_fields.items():
+        if field.annotation is int:
+            skeleton[name] = _min_allowed_int(field)
+        else:
+            skeleton[name] = _skeleton_value(field.annotation, name)
+    return skeleton
+
+
+def render_answer_format(model: type[BaseModel]) -> str:
+    """Собрать инструкцию о строгой форме JSON-ответа по pydantic-модели.
+
+    Единственный источник правды — сама модель этапа: имена верхнеуровневых
+    полей и пример-заготовка выводятся из её схемы. Ручного списка полей в
+    промптах нет, поэтому добавление поля в модель не оставит инструкцию
+    врать (D5: схему диктует модель, а не текст промпта).
+
+    Пример-заготовка — валидный экземпляр этой же модели: набор значений
+    закрывает контракт, но содержит заглушки вместо содержимого.
+    """
+
+    example = json.dumps(_skeleton_object(model), ensure_ascii=False)
+    return ANSWER_FORMAT.format(
+        fields=", ".join(model.model_fields),
+        meta_keys=", ".join(f"`{key}`" for key in SCHEMA_META_KEYS),
+        label=ANSWER_EXAMPLE_LABEL,
+        example=example,
+    )
+
 # --- Этап планирования -------------------------------------------------
 
 PLANNER_SYSTEM = (
@@ -31,7 +166,8 @@ PLANNER_SYSTEM = (
     "только валидным JSON без markdown-обёрток и пояснений."
 )
 
-# Плейсхолдеры: theme, age, moral, schema (рендер схемы StoryBrief).
+# Плейсхолдеры: theme, age, moral, schema (рендер схемы StoryBrief),
+# answer_format (строгая форма ответа `render_answer_format(StoryBrief)`).
 PLANNER_USER = (
     "Составь план детской сказки.\n"
     "Тема: {theme}.\n"
@@ -48,6 +184,7 @@ PLANNER_USER = (
     "- narrative_arc — четыре бита (завязка, нарастание, кульминация, "
     "развязка), пригодные для детской сказки для ребёнка {age} лет.\n\n"
     "Верни ответ строго по JSON-схеме:\n{schema}"
+    "\n{answer_format}"
 )
 
 # --- Этап сценариста ---------------------------------------------------
@@ -58,7 +195,8 @@ SCREENWRITER_SYSTEM = (
 )
 
 # Плейсхолдеры: logline, controlling_idea, character_arc, arc_plan,
-# num_pages, age, schema (рендер схемы PagesPayload).
+# num_pages, age, schema (рендер схемы PagesPayload), answer_format
+# (строгая форма ответа `render_answer_format(PagesPayload)`).
 SCREENWRITER_USER = (
     "Бриф сказки:\n"
     "Логлайн: {logline}\n"
@@ -72,6 +210,7 @@ SCREENWRITER_USER = (
     "видит, слышит и чувствует. Используй лексику, доступную ребёнку "
     "{age} лет. Каждая страница должна быть иллюстрируема.\n\n"
     "Верни ответ строго по JSON-схеме:\n{schema}"
+    "\n{answer_format}"
 )
 
 # Плейсхолдеры: problems, base_user, num_pages.
@@ -92,7 +231,8 @@ EXTRACTOR_SYSTEM = (
 )
 
 # Плейсхолдеры: pages (текст страниц), toy_description (описание игрушки-
-# героя), schema (рендер схемы ExtractedEntities).
+# героя), schema (рендер схемы ExtractedEntities), answer_format (строгая
+# форма ответа `render_answer_format(ExtractedEntities)`).
 EXTRACTOR_USER = (
     "Текст сказки по страницам:\n{pages}\n\n"
     "Описание игрушки-героя, по которому рисуются все иллюстрации:\n"
@@ -112,6 +252,7 @@ EXTRACTOR_USER = (
     "- имена сущностей — короткие и однозначные: на них будут ссылаться "
     "сцены.\n\n"
     "Верни ответ строго по JSON-схеме:\n{schema}"
+    "\n{answer_format}"
 )
 
 # --- Этап раскадровки --------------------------------------------------
@@ -123,7 +264,8 @@ SCENE_SYSTEM = (
 )
 
 # Плейсхолдеры: entities (реестр), pages (текст страниц),
-# schema (рендер схемы ScenesPayload).
+# schema (рендер схемы ScenesPayload), answer_format (строгая форма
+# ответа `render_answer_format(ScenesPayload)`).
 SCENE_USER = (
     "Реестр сущностей сказки:\n{entities}\n\n"
     "Текст сказки по страницам:\n{pages}\n\n"
@@ -139,12 +281,14 @@ SCENE_USER = (
     "- если ключевых объектов в кадре нет, верни пустой список "
     "objects_in_scene.\n\n"
     "Верни ответ строго по JSON-схеме:\n{schema}"
+    "\n{answer_format}"
 )
 
 # Плейсхолдеры: entities (реестр допустимых имён),
 # problem_pages (страницы с нарушениями),
 # problem_context (текущие сцены и текст проблемных страниц),
-# schema (рендер схемы ScenesPayload).
+# schema (рендер схемы ScenesPayload), answer_format (строгая форма
+# ответа `render_answer_format(ScenesPayload)`).
 SCENE_REPAIR_USER = (
     "В раскадровке есть ссылки на имена, которых нет в реестре сущностей.\n\n"
     "Допустимые имена из реестра:\n{entities}\n\n"
@@ -155,11 +299,13 @@ SCENE_REPAIR_USER = (
     "Сохрани page_num и scene_description без изменений: композиция кадра "
     "должна остаться прежней.\n\n"
     "Верни ответ строго по JSON-схеме:\n{schema}"
+    "\n{answer_format}"
 )
 
 # Плейсхолдеры: problems (список проблем покрытия), problem_pages (текст
 # проблемных страниц), problem_context (текущие сцены этих страниц),
-# schema (рендер схемы ScenesPayload).
+# schema (рендер схемы ScenesPayload), answer_format (строгая форма
+# ответа `render_answer_format(ScenesPayload)`).
 SCENE_COVERAGE_REPAIR_USER = (
     "В раскадровке нарушено покрытие страниц: на каждую страницу сказки "
     "должна приходиться ровно одна сцена с совпадающим page_num.\n\n"
@@ -172,6 +318,7 @@ SCENE_COVERAGE_REPAIR_USER = (
     "не возвращай сцену вовсе. Ссылки (characters_in_scene, location, "
     "objects_in_scene) используй только из реестра сущностей.\n\n"
     "Верни ответ строго по JSON-схеме:\n{schema}"
+    "\n{answer_format}"
 )
 
 
@@ -252,7 +399,8 @@ JUDGE_SYSTEM = (
 # Плейсхолдеры: logline, controlling_idea, arc_plan, age, story
 # (текст и сцены страниц), toy_description (описание игрушки-героя),
 # entities (реестр сущностей с описаниями), schema (рендер схемы
-# JudgeVerdict).
+# JudgeVerdict), answer_format (строгая форма ответа
+# `render_answer_format(JudgeVerdict)`).
 JUDGE_USER = (
     "Замысел сказки:\n"
     "Логлайн: {logline}\n"
@@ -279,6 +427,7 @@ JUDGE_USER = (
     "нарушений нет, верни passed=true и пустой список problem_pages. "
     "Список issues — короткие формулировки найденных проблем на русском.\n\n"
     "Верни ответ строго по JSON-схеме:\n{schema}"
+    "\n{answer_format}"
 )
 
 
@@ -292,7 +441,8 @@ REVISER_SYSTEM = (
 
 # Плейсхолдеры: logline, controlling_idea, character_arc, issues,
 # problem_context (текст и текущая сцена проблемных страниц),
-# schema (рендер схемы RevisionPayload).
+# schema (рендер схемы RevisionPayload), answer_format (строгая форма
+# ответа `render_answer_format(RevisionPayload)`).
 REVISER_USER = (
     "Бриф сказки:\n"
     "Логлайн: {logline}\n"
@@ -307,6 +457,7 @@ REVISER_USER = (
     "обязательно пересобирается под новое действие, а ссылки в сцене "
     "берутся только из реестра сущностей.\n\n"
     "Верни ответ строго по JSON-схеме:\n{schema}"
+    "\n{answer_format}"
 )
 
 

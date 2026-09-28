@@ -39,6 +39,7 @@ from app.story_pipeline.prompts import (
     SCENE_PAGE_NUMBERS_OUT_OF_RANGE,
     SCENE_REPAIR_USER,
     SCENE_SYSTEM,
+    render_answer_format,
     SCENE_USER,
     duplicate_page_numbers,
     format_entity_registry,
@@ -327,6 +328,7 @@ class SceneBreakdownStage:
             entities=format_entity_registry(entities),
             pages=format_pages(state.pages),
             schema=render_schema(ScenesPayload),
+            answer_format=render_answer_format(ScenesPayload),
         )
         payload, usage = await self._llm.complete_json(
             system=SCENE_SYSTEM,
@@ -371,6 +373,7 @@ class SceneBreakdownStage:
                     ],
                 ),
                 schema=render_schema(ScenesPayload),
+                answer_format=render_answer_format(ScenesPayload),
             )
             repair_payload, usage = await self._llm.complete_json(
                 system=SCENE_SYSTEM,
@@ -438,6 +441,7 @@ class SceneBreakdownStage:
             problem_context=scene_context or NO_SCENES_PLACEHOLDER,
             problems="; ".join(problems),
             schema=render_schema(ScenesPayload),
+            answer_format=render_answer_format(ScenesPayload),
         )
         payload, usage = await self._llm.complete_json(
             system=SCENE_SYSTEM,

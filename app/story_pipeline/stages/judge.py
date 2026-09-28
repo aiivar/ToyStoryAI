@@ -26,6 +26,7 @@ from app.story_pipeline.prompts import (
     format_optional_entity_registry,
     format_scene_pages,
     format_toy_description,
+    render_answer_format,
 )
 from app.story_pipeline.providers.llm import LLMClient, render_schema
 
@@ -87,6 +88,7 @@ class JudgeStage:
             entities=format_optional_entity_registry(state.entities),
             story=format_scene_pages(state.scenes, state.pages),
             schema=render_schema(JudgeVerdict),
+            answer_format=render_answer_format(JudgeVerdict),
         )
         verdict, usage = await self._llm.complete_json(
             system=JUDGE_SYSTEM,

@@ -31,6 +31,7 @@ from app.story_pipeline.prompts import (
     duplicate_page_numbers,
     format_arc_plan,
     format_page_numbers,
+    render_answer_format,
 )
 from app.story_pipeline.providers.llm import LLMClient, render_schema
 from app.story_pipeline.stages._usage import add_tokens
@@ -99,6 +100,7 @@ class ScreenwriterStage:
             num_pages=state.num_pages,
             age=state.age,
             schema=render_schema(PagesPayload),
+            answer_format=render_answer_format(PagesPayload),
         )
         payload, usage = await self._llm.complete_json(
             system=SCREENWRITER_SYSTEM,

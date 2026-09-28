@@ -10,7 +10,11 @@ from __future__ import annotations
 import time
 
 from app.story_pipeline.models import StageMetrics, StoryBrief, StoryState
-from app.story_pipeline.prompts import PLANNER_SYSTEM, PLANNER_USER
+from app.story_pipeline.prompts import (
+    PLANNER_SYSTEM,
+    PLANNER_USER,
+    render_answer_format,
+)
 from app.story_pipeline.providers.llm import LLMClient, render_schema
 
 # Температура этапа планирования (см. spec story-text-generation).
@@ -34,6 +38,7 @@ class PlannerStage:
             age=state.age,
             moral=state.moral,
             schema=render_schema(StoryBrief),
+            answer_format=render_answer_format(StoryBrief),
         )
         brief, usage = await self._llm.complete_json(
             system=PLANNER_SYSTEM,
