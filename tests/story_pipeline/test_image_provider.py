@@ -23,6 +23,7 @@ from app.story_pipeline.errors import (
 from app.story_pipeline.providers.image import (
     GeminiImageProvider,
     MockImageProvider,
+    RouterAIImageProvider,
     make_image_provider,
 )
 from app.story_pipeline.settings import StorySettings
@@ -74,19 +75,21 @@ async def test_mock_provider_has_no_http_client() -> None:
 
 
 def test_factory_without_key_returns_mock() -> None:
-    """Пустой ключ Gemini включает mock-провайдер."""
+    """Пустой ключ RouterAI включает mock-провайдер без HTTP-клиента."""
 
-    provider = make_image_provider(_settings(gemini_api_key=""))
+    provider = make_image_provider(_settings(routerai_api_key=""))
 
     assert isinstance(provider, MockImageProvider)
+    # Mock не создаёт клиент: у него нет ни сети, ни состояния соединения.
+    assert not hasattr(provider, "_client")
 
 
-def test_factory_with_key_returns_gemini() -> None:
-    """Непустой ключ Gemini включает реальный провайдер."""
+def test_factory_with_key_returns_routerai() -> None:
+    """Непустой ключ RouterAI включает реальный провайдер."""
 
-    provider = make_image_provider(_settings(gemini_api_key="secret"))
+    provider = make_image_provider(_settings(routerai_api_key="secret"))
 
-    assert isinstance(provider, GeminiImageProvider)
+    assert isinstance(provider, RouterAIImageProvider)
 
 
 # --- Gemini: успешный вызов --------------------------------------------

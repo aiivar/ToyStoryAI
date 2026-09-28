@@ -80,6 +80,7 @@ class FakeImageProvider:
         *,
         seed: int | None = None,
         reference_images: list[bytes] | None = None,
+        aspect_ratio: str | None = None,
     ) -> GeneratedImage:
         """Записать вызов и вернуть следующий заготовленный ответ."""
 
@@ -89,6 +90,7 @@ class FakeImageProvider:
                 "prompt": prompt,
                 "seed": seed,
                 "reference_images": reference_images,
+                "aspect_ratio": aspect_ratio,
             }
         )
         if self._responses is not None:
