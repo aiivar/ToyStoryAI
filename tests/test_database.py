@@ -208,6 +208,21 @@ async def test_history_skips_legacy_video_rows(
     history = await repository.get_history(250)
 
     assert [item.id for item in history] == [tale.id]
+    # Отбор сделан в SQL, поэтому в ORM попадают только записи известного типа.
+    assert [item.type for item in history] == [GenerationType.TALE]
+
+
+def test_repository_has_no_get_by_id() -> None:
+    """Мёртвый `get_by_id` удалён из репозитория.
+
+    Метод не имеет ни одного вызывающего в `app/`, а его единственный
+    возможный вход на реальных данных бросал `LookupError`: чтение записи
+    `type = 'video'` упирается в перечисление `GenerationType`, которое
+    таких значений уже не содержит. Держать такой вход в публичном API
+    репозитория — значит оставлять мину замедленного действия.
+    """
+
+    assert not hasattr(GenerationRepository, "get_by_id")
 
 
 async def test_history_is_isolated_per_user(

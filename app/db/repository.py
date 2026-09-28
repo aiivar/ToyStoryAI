@@ -98,12 +98,6 @@ class GenerationRepository:
             await session.refresh(generation)
             return generation
 
-    async def get_by_id(self, generation_id: int) -> Generation | None:
-        """Вернуть запись по идентификатору."""
-
-        async with self._db.session_scope() as session:
-            return await session.get(Generation, generation_id)
-
     async def get_history(
         self,
         user_id: int,
