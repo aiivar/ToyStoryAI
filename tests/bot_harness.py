@@ -3,13 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from uuid import uuid4
 
 from maxapi.types.attachments.image import Image
 
@@ -21,10 +17,6 @@ from app.services.storage import PhotoStorage
 from app.services.toy_vision import ToyDescription
 from app.story_pipeline.models import StoryState
 from app.story_pipeline.settings import StorySettings
-
-# Каталог для файлов иллюстраций в заглушках пайплайна: временный, внутри
-# репозитория, ничего не коммитится.
-TMP_DIR = Path(".tmp/tests")
 
 
 class FakeMessage:
@@ -68,49 +60,6 @@ class FakeMessageCreated:
             self.message.recipient.chat_id,
             self.message.sender.user_id,
         )
-
-
-def default_story_state(
-    *,
-    status: str = "ok",
-    pages: int = 1,
-    illustrated: tuple[int, ...] | None = None,
-) -> StoryState:
-    """Состояние прогона с указанными страницами и файлами иллюстраций.
-
-    Файлы пишутся в `output_dir`, который по умолчанию — временный каталог
-    pytest: тесты диалога не проверяют содержимое картинок, но должны иметь
-    файлы на диске, иначе ветка выдачи страниц уходит в «файл не найден».
-    """
-
-    from app.story_pipeline.models import PageArt, PageText
-
-    output_dir = Path(TMP_DIR) / f"pages-{uuid4().hex}"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    illustrated = (
-        tuple(range(1, pages + 1)) if illustrated is None else illustrated
-    )
-    images: list[PageArt] = []
-    for number in illustrated:
-        image_path = output_dir / f"page_{number}.png"
-        image_path.write_bytes(b"\x89PNG-page")
-        images.append(
-            PageArt(page_num=number, path=str(image_path), seed=1000 + number)
-        )
-    return StoryState(
-        theme="Сказка о любимой игрушке",
-        age=4,
-        moral="делиться с другими",
-        num_pages=pages,
-        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        pages=[
-            PageText(page_num=number, text=f"Текст страницы {number}.")
-            for number in range(1, pages + 1)
-        ],
-        images=images,
-        output_dir=str(output_dir),
-        status=status,  # type: ignore[arg-type]
-    )
 
 
 class FakeBotStarted:
@@ -187,7 +136,12 @@ class FakeMessageCallback:
 
 
 class FakeContext:
-    """In-memory реализация FSM-контекста."""
+    """In-memory реализация FSM-контекста.
+
+    `history` хранит снимки данных при каждом изменении: тестам нужно видеть,
+    что лежало в состоянии в момент запуска генерации, — после сброса диалога
+    это уже не проверить.
+    """
 
     def __init__(
         self,
@@ -196,19 +150,26 @@ class FakeContext:
     ) -> None:
         self.state = state
         self.data = dict(data or {})
+        self.history: list[dict[str, Any]] = []
+
+    def _snapshot(self) -> None:
+        self.history.append(dict(self.data))
 
     async def get_data(self) -> dict[str, Any]:
         return dict(self.data)
 
     async def set_data(self, data: dict[str, Any]) -> None:
         self.data = dict(data)
+        self._snapshot()
 
     async def update_data(self, **kwargs: Any) -> dict[str, Any]:
         self.data.update(kwargs)
+        self._snapshot()
         return dict(self.data)
 
     async def set_state(self, state: Any | None = None) -> None:
         self.state = state
+        self._snapshot()
 
     async def get_state(self) -> Any | None:
         return self.state
@@ -216,6 +177,7 @@ class FakeContext:
     async def clear(self) -> None:
         self.state = None
         self.data = {}
+        self._snapshot()
 
 
 class FakeDispatcher:
@@ -368,9 +330,10 @@ def make_services(
 ) -> BotServices:
     """Собрать `BotServices` с фейковыми внешними сервисами.
 
-    `pipeline` — заглушка пайплайна; её состояние прогона задаёт тест. Если
-    заглушка не передана, используется общая: она отдаёт состояние с одной
-    страницей без иллюстрации, чего достаточно для тестов диалога.
+    `pipeline` — заглушка пайплайна, состояние прогона которой задаёт тест.
+    Заглучка по умолчанию результата не имеет и падает на `run`, поэтому тест,
+    который доводит прогон до конца, обязан передать свою: пустой пайплайн
+    годится только для проверок, где до `run` дело не доходит.
     """
 
     async def _download(url: str) -> bytes:  # pragma: no cover - подмена
@@ -414,9 +377,6 @@ def keyboard_labels(attachments: list[Any] | None) -> list[list[str]]:
     markup = attachments[0]
     buttons = markup.payload.buttons
     return [[button.text for button in row] for row in buttons]
-
-
-SenderFactory = Callable[[], Any]
 
 
 __all__ = [

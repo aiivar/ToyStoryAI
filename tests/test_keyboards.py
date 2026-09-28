@@ -116,7 +116,11 @@ def test_service_keyboards_keep_single_buttons() -> None:
 
 
 def test_story_flow_states_cover_new_dialog() -> None:
-    """FSM знает состояния ожидания возраста и морали вместо стиля и действия."""
+    """FSM знает состояния ожидания возраста и морали вместо стиля и действия.
+
+    Состояния «генерируется» нет: прогон живёт в фоне и переживает апдейт,
+    поэтому его наличие проверяет реестр задач, а не FSM.
+    """
 
     # `StatesGroup` хранит состояния в атрибутах класса, а не в реестре
     # словаря: имена берутся из объявленных атрибутов, чтобы тест не
@@ -129,11 +133,10 @@ def test_story_flow_states_cover_new_dialog() -> None:
         if isinstance(value, State)
     }
 
-    assert {
+    assert names == {
         "waiting_photo",
         "waiting_age",
         "waiting_moral",
-        "generating",
-    } <= names
+    }
     assert "waiting_style" not in names
     assert "waiting_action" not in names

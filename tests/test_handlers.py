@@ -305,11 +305,17 @@ async def test_full_dialog_stores_age_and_moral_and_runs_generation(
     await registered.callback(event, context)
     await registered.runs.wait_idle()
 
-    # Возраст и мораль остаются в состоянии диалога (требование спецификации).
-    assert context.data["age"] == 6
-    assert context.data["moral"] == MORAL_OPTIONS[1]
+    # Возраст и мораль сохранены в состоянии диалога на момент запуска.
+    assert any(
+        snapshot.get("age") == 6
+        and snapshot.get("moral") == MORAL_OPTIONS[1]
+        for snapshot in context.history
+    )
     assert event.sent_texts == [handlers_module.GENERATION_STARTED]
-    assert context.state == StoryFlow.generating
+    # Диалог на этом закончен: состояние снова ждёт фото, а выбранные
+    # параметры ушли в прогон, поэтому хранить их дальше незачем.
+    assert context.state == StoryFlow.waiting_photo
+    assert context.data == {}
 
     # Фото ушло на распознавание и прогон отчитался пользователю.
     assert vision.photos == [make_photo_bytes(400, 400)]
@@ -576,8 +582,10 @@ async def test_text_message_during_generation_says_run_in_progress(
     await registered.callback(FakeMessageCallback("age:4"), context)
     await registered.callback(FakeMessageCallback("moral:0"), context)
 
+    # Диалог уже закончен, состояние ждёт фото — но прогон ещё идёт.
+    assert context.state == StoryFlow.waiting_photo
     event = FakeMessageCreated(FakeMessage())
-    await registered.other_message(event, FakeContext(state=StoryFlow.generating))
+    await registered.other_message(event, context)
 
     assert event.message.sent_texts == [handlers_module.ALREADY_RUNNING]
 
@@ -585,16 +593,54 @@ async def test_text_message_during_generation_says_run_in_progress(
     await registered.runs.wait_idle()
 
 
-async def test_text_message_after_generation_offers_restart(
+async def test_photo_during_generation_does_not_start_another_tale(
     settings: Settings,
     repository: GenerationRepository,
     storage: PhotoStorage,
 ) -> None:
-    """После завершения прогона состояние `generating` не вводит в заблуждение.
+    """Фото, присланное во время прогона, не создаёт вторую сказку."""
 
-    Реестр снял прогон с учёта, а состояние FSM осталось прежним: без
-    проверки реестра пользователь получал бы «уже готовится» вечно.
-    """
+    import asyncio
+
+    release = asyncio.Event()
+
+    class _BlockedPipeline(FakePipeline):
+        async def run(self, state):  # type: ignore[no-untyped-def]
+            self.entered.set()
+            await release.wait()
+            return await super().run(state)
+
+    registered, _ = _register(
+        settings,
+        repository,
+        storage,
+        pipeline=_BlockedPipeline(),
+        download_photo=_photo_download(make_photo_bytes(400, 400)),
+    )
+    context = FakeContext(state=StoryFlow.waiting_photo)
+    await _prepare_dialog(registered, context)
+    await registered.callback(FakeMessageCallback("age:4"), context)
+    await registered.callback(FakeMessageCallback("moral:0"), context)
+
+    event = FakeMessageCreated(
+        FakeMessage(attachments=[make_image_attachment("http://max/again")])
+    )
+    await registered.photo(event, context)
+
+    assert event.message.sent_texts == [handlers_module.ALREADY_RUNNING]
+    # Второй прогон не заведён: платную работу не начинаем.
+    assert len(await repository.get_history(1)) == 1
+
+    release.set()
+    await registered.runs.wait_idle()
+
+
+async def test_after_generation_dialog_waits_photo_again(
+    settings: Settings,
+    repository: GenerationRepository,
+    storage: PhotoStorage,
+) -> None:
+    """После прогона состояние снова ждёт фото — «уже готовится» не зависает."""
 
     registered, _ = _register(
         settings,
@@ -608,12 +654,9 @@ async def test_text_message_after_generation_offers_restart(
     await registered.callback(FakeMessageCallback("moral:0"), context)
     await registered.runs.wait_idle()
 
-    event = FakeMessageCreated(FakeMessage())
-    await registered.other_message(
-        event, FakeContext(state=StoryFlow.generating)
-    )
+    assert context.state == StoryFlow.waiting_photo
+    assert registered.runs.is_running(1) is False
 
-    assert event.message.sent_texts == [handlers_module.GENERATION_FINISHED]
-    assert keyboard_labels(event.message.sent[-1].attachments) == [
-        ["Начать заново"]
-    ]
+    event = FakeMessageCreated(FakeMessage())
+    await registered.other_message(event, context)
+    assert event.message.sent_texts == [handlers_module.NOT_A_PHOTO]

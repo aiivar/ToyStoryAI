@@ -11,12 +11,14 @@ class StoryFlow(StatesGroup):
     `waiting_style` и `waiting_action` прежнего флоу заменены на
     `waiting_age` и `waiting_moral`: пайплайн просит возраст читателя и
     мораль, а стиль и действие игрушки в новом сюжете не участвуют.
+
+    Отдельного состояния «генерируется» нет: прогон идёт в фоне и переживает
+    апдейт, поэтому его наличие проверяет реестр задач раннера, а не FSM.
     """
 
     waiting_photo = State()
     waiting_age = State()
     waiting_moral = State()
-    generating = State()
 
 
 __all__ = ["StoryFlow"]

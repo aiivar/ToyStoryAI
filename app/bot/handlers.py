@@ -83,10 +83,6 @@ ALREADY_RUNNING = (
     "Сказка уже готовится, второй прогон не запускаю. Страницы придут "
     "сюда по мере готовности."
 )
-GENERATION_FINISHED = (
-    "Эта сказка уже готова — страницы пришли выше. Чтобы сделать новую, "
-    "начните заново."
-)
 RESTART_HINT = "Давайте начнём заново. Пришлите фото игрушки."
 SUBSCRIPTION_STUB = (
     "Покупка подписки пока недоступна — мы работаем над этим. "
@@ -260,6 +256,13 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
 
     async def on_photo(event: MessageCreated, context: BaseContext) -> None:
         user_id = _extract_user_id(event)
+        if runs.is_running(user_id):
+            # Идёт платный прогон: вторую сказку не начинаем, иначе один
+            # нетерпеливый пользователь оплачивал бы прогоны пачками.
+            logger.info("Фото во время прогона пользователя {}", user_id)
+            await _reply(event.message.answer, ALREADY_RUNNING)
+            return
+
         attachments = event.message.body.attachments if event.message.body else None
         logger.info(
             "Приём фото: вложений={} ({})",
@@ -335,9 +338,13 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
         """Ответить на неожиданное сообщение подсказкой с нужной клавиатурой.
 
         Молчание здесь хуже подсказки: пользователь не понимает, что бот
-        ждёт кнопку, и пишет ещё текст. В состоянии генерации сообщаем, что
-        прогона второй раз не будет.
+        ждёт кнопку, и пишет ещё текст. Пока идёт платный прогон, на любое
+        сообщение отвечаем одинаково: идёт генерация, второй раз не запускаем.
         """
+
+        if runs.is_running(_extract_user_id(event)):
+            await _reply(event.message.answer, ALREADY_RUNNING)
+            return
 
         state = await context.get_state()
         if state == StoryFlow.waiting_age:
@@ -352,20 +359,6 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
                 event.message.answer,
                 MORAL_HINT,
                 [build_moral_keyboard().as_markup()],
-            )
-            return
-        if state == StoryFlow.generating:
-            # Состояние `generating` переживает конец прогона: фоновая задача
-            # снята с учёта, а состояние осталось. Поэтому истина о том, идёт
-            # ли генерация, берётся из реестра, а не из FSM — иначе
-            # пользователь после успеха вечно получал бы «уже готовится».
-            if runs.is_running(_extract_user_id(event)):
-                await _reply(event.message.answer, ALREADY_RUNNING)
-                return
-            await _reply(
-                event.message.answer,
-                GENERATION_FINISHED,
-                [build_restart_keyboard().as_markup()],
             )
             return
         logger.info("Ожидалось фото, получено иное сообщение — прошу фото")
@@ -471,11 +464,14 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
             return
 
         await _callback_send(event, GENERATION_STARTED)
-        # Параметры (возраст, мораль, фото) остаются в состоянии — по спецификации
-        # диалог должен их помнить, — но состояние уходит в `generating`:
-        # повторный выбор морали отсюда уже не запускает прогон, а реестр
-        # отсекает второй запуск, пока идёт первый.
-        await context.set_state(StoryFlow.generating)
+        # Диалог на этом закончен: параметры ушли в прогон, а состояние
+        # снова ждёт фото. Отдельного состояния «генерируется» нет намеренно:
+        # прогон живёт в фоне и дольше жизни апдейта, поэтому истина о том,
+        # идёт ли он, берётся из реестра (`runs.is_running`), а не из FSM.
+        # Ложь в состоянии оборачивается либо вечным «уже готовится», либо
+        # возможностью запустить второй платный прогон.
+        await context.clear()
+        await context.set_state(StoryFlow.waiting_photo)
 
     async def on_callback(
         event: MessageCallback,
@@ -519,7 +515,6 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
         StoryFlow.waiting_photo,
         StoryFlow.waiting_age,
         StoryFlow.waiting_moral,
-        StoryFlow.generating,
     )(on_other_message)
     dp.message_callback()(on_callback)
 
