@@ -173,6 +173,31 @@ async def test_judge_prompt_covers_three_criteria_and_brief(
     assert '"title": "JudgeVerdict"' in user
 
 
+async def test_judge_prompt_lists_four_criteria(fake_llm) -> None:
+    """Промпт судьи содержит четыре критерия: три прежних и новый.
+
+    Критерий согласованности описания героя добавлен (D13) и не вытеснил ни
+    одного прежнего: без текст-сцена, целостности и безопасности ревизия
+    теряет то, ради чего существует.
+    """
+
+    llm = fake_llm([JudgeVerdict(passed=True, issues=[], problem_pages=[])])
+    stage = JudgeStage(llm)
+
+    await stage.run(_state())
+
+    user = llm.calls[0]["user"]
+    # Прежние три критерия на месте, дословно.
+    assert "Соответствие текста и сцены" in user
+    assert "Нарративная целостность" in user
+    assert "Возрастная безопасность" in user
+    # Четвёртый: согласованность описания героя между текстом и реестром.
+    assert "Согласованность описания героя" in user
+    assert "не противоречит" in user
+    # Критериев ровно четыре — заголовок не устарел.
+    assert "по четырём критериям" in user
+
+
 async def test_judge_requires_brief(fake_llm) -> None:
     """Судья без брифа падает типизированно, не обращаясь к LLM."""
 
