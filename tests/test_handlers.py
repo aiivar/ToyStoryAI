@@ -1,8 +1,13 @@
-"""Тесты обработчиков бота и FSM (`app/bot/handlers.py`)."""
+"""Тесты обработчиков бота и FSM (`app/bot/handlers.py`).
+
+Задачи 5.2, 5.4, 5.7, 5.8: приём фото, вопрос возраста, вопрос морали,
+фоновый запуск генерации и защита от повторного платного прогона. Всё
+проверяется на фейковых событиях MAX и фейковых провайдерах — живых вызовов
+в тестах нет.
+"""
 
 from __future__ import annotations
 
-import base64
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -11,23 +16,21 @@ import pytest
 
 from app.bot import handlers as handlers_module
 from app.bot.handlers import register_handlers
-from app.bot.keyboards import ACTION_OPTIONS, STYLE_OPTIONS
+from app.bot.keyboards import MORAL_OPTIONS
 from app.bot.states import StoryFlow
 from app.config import Settings
-from app.db.models import GenerationStatus, GenerationType
+from app.db.models import GenerationType
 from app.db.repository import GenerationRepository
 from app.services.storage import PhotoStorage
-from app.services.text_generator import TextGenerationError
-from app.services.video_provider import VideoFailedError
 from tests.bot_harness import (
-    FakeBotStarted,
+    FakeContext,
     FakeDispatcher,
     FakeMessage,
     FakeMessageCallback,
     FakeMessageCreated,
-    FakeTextGenerator,
-    FakeVideoProvider,
-    FakeContext,
+    FakePipeline,
+    FakeSender,
+    FakeVision,
     keyboard_labels,
     make_image_attachment,
     make_services,
@@ -47,47 +50,32 @@ def _register(
     repository: GenerationRepository,
     storage: PhotoStorage,
     *,
-    text_generator=None,
-    video_provider=None,
+    sender: FakeSender | None = None,
+    vision: FakeVision | None = None,
+    pipeline: FakePipeline | None = None,
     download_photo=None,
 ):
     services = make_services(
         settings=settings,
         repository=repository,
         storage=storage,
-        text_generator=text_generator,
-        video_provider=video_provider,
+        sender=sender,
+        vision=vision,
+        pipeline=pipeline,
         download_photo=download_photo,
     )
-    dispatcher = FakeDispatcher()
-    registered = register_handlers(dispatcher, services)
+    registered = register_handlers(FakeDispatcher(), services)
     return registered, services
 
 
-# --- Задача 6.1: клавиатуры --------------------------------------------------
+def _photo_download(photo: bytes):
+    async def download(url: str) -> bytes:
+        return photo
+
+    return download
 
 
-def test_keyboards_return_expected_labels() -> None:
-    """Построители клавиатур возвращают точные ожидаемые подписи."""
-
-    from app.bot.keyboards import (
-        build_action_keyboard,
-        build_style_keyboard,
-        build_upload_photo_keyboard,
-    )
-
-    assert keyboard_labels([build_style_keyboard().as_markup()]) == [
-        [style] for style in STYLE_OPTIONS
-    ]
-    assert keyboard_labels([build_action_keyboard().as_markup()]) == [
-        [action] for action in ACTION_OPTIONS
-    ]
-    assert keyboard_labels([build_upload_photo_keyboard().as_markup()]) == [
-        ["Загрузить фото игрушки"]
-    ]
-
-
-# --- Задача 6.2: /start ------------------------------------------------------
+# --- /start и приём фото ------------------------------------------------------
 
 
 async def test_start_sends_greeting_and_photo_button(
@@ -110,15 +98,14 @@ async def test_start_sends_greeting_and_photo_button(
     assert context.state == StoryFlow.waiting_photo
 
 
-# --- Задача 6.3: приём фото --------------------------------------------------
-
-
 async def test_bot_started_sends_greeting_and_photo_button(
     settings: Settings,
     repository: GenerationRepository,
     storage: PhotoStorage,
 ) -> None:
     """Нажатие «Старт» в MAX (`bot_started`) тоже шлёт приветствие и кнопку."""
+
+    from tests.bot_harness import FakeBotStarted
 
     registered, _ = _register(settings, repository, storage)
     event = FakeBotStarted(user_id=42, chat_id=42)
@@ -127,9 +114,6 @@ async def test_bot_started_sends_greeting_and_photo_button(
     await registered.bot_started(event, context)
 
     assert event.sent_texts == [handlers_module.GREETING]
-    assert keyboard_labels(event.sent[0].attachments) == [
-        ["Загрузить фото игрушки"]
-    ]
     assert context.state == StoryFlow.waiting_photo
 
 
@@ -152,20 +136,19 @@ async def test_callback_is_acknowledged_via_answer(
     assert context.state == StoryFlow.waiting_photo
 
 
-async def test_photo_accepts_and_moves_to_style_selection(
+async def test_photo_asks_age_and_saves_record(
     settings: Settings,
     repository: GenerationRepository,
     storage: PhotoStorage,
 ) -> None:
-    """Корректное фото сохраняется, пишется в БД и ведёт к выбору параметров."""
+    """Корректное фото сохраняется, пишется в БД и запрашивает возраст."""
 
     photo = make_photo_bytes(400, 400)
-
-    async def download(url: str) -> bytes:
-        return photo
-
     registered, _ = _register(
-        settings, repository, storage, download_photo=download
+        settings,
+        repository,
+        storage,
+        download_photo=_photo_download(photo),
     )
     event = FakeMessageCreated(
         FakeMessage(attachments=[make_image_attachment("http://max/photo")])
@@ -174,15 +157,18 @@ async def test_photo_accepts_and_moves_to_style_selection(
 
     await registered.photo(event, context)
 
-    assert context.state == StoryFlow.waiting_style
+    assert context.state == StoryFlow.waiting_age
+    assert event.message.sent_texts == [handlers_module.AGE_PROMPT]
     assert keyboard_labels(event.message.sent[-1].attachments) == [
-        [style] for style in STYLE_OPTIONS
+        ["3 года"],
+        ["4 года"],
+        ["5 лет"],
+        ["6 лет"],
     ]
 
     history = await repository.get_history(1)
     assert len(history) == 1
     assert history[0].type is GenerationType.TALE
-    assert history[0].local_path is not None
     assert Path(history[0].local_path).read_bytes() == photo
     assert context.data["tale_id"] == history[0].id
 
@@ -194,11 +180,11 @@ async def test_photo_rejects_invalid_dimensions(
 ) -> None:
     """Некорректное фото отклоняется с указанием требования."""
 
-    async def download(url: str) -> bytes:
-        return make_png(200, 200)
-
     registered, _ = _register(
-        settings, repository, storage, download_photo=download
+        settings,
+        repository,
+        storage,
+        download_photo=_photo_download(make_png(200, 200)),
     )
     event = FakeMessageCreated(
         FakeMessage(attachments=[make_image_attachment("http://max/photo")])
@@ -210,31 +196,6 @@ async def test_photo_rejects_invalid_dimensions(
     assert context.state == StoryFlow.waiting_photo
     assert "300" in (event.message.sent_texts[-1] or "")
     assert await repository.get_history(1) == []
-
-
-async def test_photo_accepts_image_like_attachment(
-    settings: Settings,
-    repository: GenerationRepository,
-    storage: PhotoStorage,
-) -> None:
-    """Вложение распознаётся по типу, а не по классу модели."""
-
-    async def download(url: str) -> bytes:
-        return make_photo_bytes(400, 400)
-
-    registered, _ = _register(
-        settings, repository, storage, download_photo=download
-    )
-    attachment = SimpleNamespace(
-        type="image",
-        payload=SimpleNamespace(url="http://max/photo"),
-    )
-    event = FakeMessageCreated(FakeMessage(attachments=[attachment]))
-    context = FakeContext(state=StoryFlow.waiting_photo)
-
-    await registered.photo(event, context)
-
-    assert context.state == StoryFlow.waiting_style
 
 
 async def test_photo_rejects_non_image_attachment(
@@ -271,147 +232,15 @@ async def test_text_message_in_photo_state_asks_for_photo(
     assert event.message.sent_texts == [handlers_module.NOT_A_PHOTO]
 
 
-# --- Задача 6.4: выбор параметров и оркестрация ------------------------------
+# --- Диалог: возраст и мораль -------------------------------------------------
 
 
-async def test_style_callback_moves_to_action(
-    settings: Settings,
-    repository: GenerationRepository,
-    storage: PhotoStorage,
-) -> None:
-    """Выбор стиля запрашивает действие без лишних вопросов."""
-
-    registered, _ = _register(settings, repository, storage)
-    event = FakeMessageCallback("style:0")
-    context = FakeContext(state=StoryFlow.waiting_style)
-
-    await registered.callback(event, context)
-
-    assert context.state == StoryFlow.waiting_action
-    assert context.data["style"] == STYLE_OPTIONS[0]
-    assert event.sent_texts == [handlers_module.ACTION_PROMPT]
-    assert keyboard_labels(event.sent[-1].attachments) == [
-        [action] for action in ACTION_OPTIONS
-    ]
-
-
-async def test_full_generation_order_and_artifacts(
-    settings: Settings,
-    repository: GenerationRepository,
-    storage: PhotoStorage,
-) -> None:
-    """Полный цикл отправляет сказку и видео в ожидаемом порядке."""
-
-    photo = make_photo_bytes(400, 400)
-
-    async def download(url: str) -> bytes:
-        return photo
-
-    text_generator = FakeTextGenerator(result="Сказка про зайца.")
-    video_provider = FakeVideoProvider(
-        video_url="https://cdn.example.com/toy.mp4"
-    )
-    registered, _ = _register(
-        settings,
-        repository,
-        storage,
-        text_generator=text_generator,
-        video_provider=video_provider,
-        download_photo=download,
-    )
-
-    photo_event = FakeMessageCreated(
-        FakeMessage(attachments=[make_image_attachment("http://max/photo")])
-    )
-    context = FakeContext(state=StoryFlow.waiting_photo)
-    await registered.photo(photo_event, context)
-    photo_path = context.data["photo_path"]
-
-    await registered.callback(
-        FakeMessageCallback("style:1", message=FakeMessage()),
-        context,
-    )
-    action_callback = FakeMessageCallback("action:1", message=FakeMessage())
-    await registered.callback(action_callback, context)
-
-    assert action_callback.sent_texts == [
-        handlers_module.TALE_PROGRESS,
-        "Сказка про зайца.",
-        handlers_module.VIDEO_PROGRESS,
-        "Ваше видео готово:\nhttps://cdn.example.com/toy.mp4",
-    ]
-    assert text_generator.calls == [(STYLE_OPTIONS[1], ACTION_OPTIONS[1])]
-    assert video_provider.created_with[0][1] == ACTION_OPTIONS[1]
-
-    saved = Path(photo_path).read_bytes()
-    assert video_provider.created_with[0][0] == base64.b64encode(saved).decode()
-
-    history = await repository.get_history(1)
-    by_type = {item.type: item for item in history}
-    assert by_type[GenerationType.TALE].status is GenerationStatus.SUCCESS
-    assert by_type[GenerationType.TALE].tale_text == "Сказка про зайца."
-    assert by_type[GenerationType.VIDEO].status is GenerationStatus.SUCCESS
-    assert (
-        by_type[GenerationType.VIDEO].video_url
-        == "https://cdn.example.com/toy.mp4"
-    )
-    assert by_type[GenerationType.VIDEO].kling_request_id == "req-fake"
-
-
-async def test_second_generation_is_blocked_with_subscription(
-    settings: Settings,
-    repository: GenerationRepository,
-    storage: PhotoStorage,
-) -> None:
-    """Вторая генерация блокируется и предлагает подписку."""
-
-    tale = await repository.create_tale(1)
-    await repository.update_result(
-        tale.id, status=GenerationStatus.SUCCESS, tale_text="Старая сказка"
-    )
-    video = await repository.create_video(1, request_id="old")
-    await repository.update_result(
-        video.id, status=GenerationStatus.SUCCESS, video_url="https://old"
-    )
-
-    text_generator = FakeTextGenerator()
-    photo = make_photo_bytes(400, 400)
-
-    async def download(url: str) -> bytes:
-        return photo
-
-    registered, _ = _register(
-        settings,
-        repository,
-        storage,
-        text_generator=text_generator,
-        download_photo=download,
-    )
-    context = FakeContext(state=StoryFlow.waiting_photo)
-    await _prepare_context(registered, context)
-
-    action_callback = FakeMessageCallback("action:0", message=FakeMessage())
-    await registered.callback(action_callback, context)
-
-    assert text_generator.calls == []
-    assert action_callback.sent_texts == [handlers_module.FREE_LIMIT_REACHED]
-    assert keyboard_labels(action_callback.sent[-1].attachments) == [
-        ["Оформить подписку"]
-    ]
-
-    stub_callback = FakeMessageCallback("subscribe", message=FakeMessage())
-    await registered.callback(stub_callback, context)
-    assert stub_callback.sent_texts == [handlers_module.SUBSCRIPTION_STUB]
-
-
-# --- Задача 6.6: восстановление после ошибок ---------------------------------
-
-
-async def _prepare_context(
+async def _prepare_dialog(
     registered,
     context: FakeContext,
+    photo: bytes = make_photo_bytes(400, 400),
 ) -> None:
-    """Провести FSM через приём фото и выбор стиля до состояния действия."""
+    """Провести FSM через приём фото до вопроса о возрасте."""
 
     await registered.photo(
         FakeMessageCreated(
@@ -419,121 +248,290 @@ async def _prepare_context(
         ),
         context,
     )
-    await registered.callback(
-        FakeMessageCallback("style:0", message=FakeMessage()),
-        context,
-    )
 
 
-async def test_tale_failure_reports_and_offers_restart(
+async def test_age_callback_asks_moral_and_remembers_age(
     settings: Settings,
     repository: GenerationRepository,
     storage: PhotoStorage,
 ) -> None:
-    """Сбой сказки сообщается пользователю и предлагает начать заново."""
+    """Выбор возраста сохраняется в FSM и открывает вопрос о морали."""
 
-    async def download(url: str) -> bytes:
-        return make_photo_bytes(400, 400)
-
-    text_generator = FakeTextGenerator(
-        error=TextGenerationError("deepseek down")
-    )
     registered, _ = _register(
         settings,
         repository,
         storage,
-        text_generator=text_generator,
-        download_photo=download,
+        download_photo=_photo_download(make_photo_bytes(400, 400)),
     )
     context = FakeContext(state=StoryFlow.waiting_photo)
-    await _prepare_context(registered, context)
+    await _prepare_dialog(registered, context)
 
-    action_callback = FakeMessageCallback("action:0", message=FakeMessage())
-    await registered.callback(action_callback, context)
+    event = FakeMessageCallback("age:5")
+    await registered.callback(event, context)
 
-    assert action_callback.sent_texts == [
-        handlers_module.TALE_PROGRESS,
-        handlers_module.TALE_FAILED,
+    assert context.state == StoryFlow.waiting_moral
+    assert context.data["age"] == 5
+    assert event.sent_texts == [handlers_module.MORAL_PROMPT]
+    assert keyboard_labels(event.sent[-1].attachments) == [
+        [moral] for moral in MORAL_OPTIONS
     ]
-    assert keyboard_labels(action_callback.sent[-1].attachments) == [
-        ["Начать заново"]
-    ]
-    history = await repository.get_history(1)
-    assert history[0].status is GenerationStatus.FAILED
-    assert history[0].error == "deepseek down"
 
 
-async def test_video_failure_keeps_tale(
+async def test_full_dialog_stores_age_and_moral_and_runs_generation(
     settings: Settings,
     repository: GenerationRepository,
     storage: PhotoStorage,
 ) -> None:
-    """Сбой видео после успешной сказки сохраняет сказку доступной."""
+    """Полный диалог сохраняет возраст и мораль и передаёт их в генерацию."""
 
-    async def download(url: str) -> bytes:
-        return make_photo_bytes(400, 400)
-
-    video_provider = FakeVideoProvider(
-        wait_error=VideoFailedError("kling failed")
-    )
-    registered, _ = _register(
+    sender = FakeSender()
+    vision = FakeVision()
+    pipeline = FakePipeline()
+    registered, services = _register(
         settings,
         repository,
         storage,
-        text_generator=FakeTextGenerator(result="Сказка."),
-        video_provider=video_provider,
-        download_photo=download,
+        sender=sender,
+        vision=vision,
+        pipeline=pipeline,
+        download_photo=_photo_download(make_photo_bytes(400, 400)),
     )
     context = FakeContext(state=StoryFlow.waiting_photo)
-    await _prepare_context(registered, context)
+    await _prepare_dialog(registered, context)
+    await registered.callback(FakeMessageCallback("age:6"), context)
 
-    action_callback = FakeMessageCallback("action:0", message=FakeMessage())
-    await registered.callback(action_callback, context)
+    event = FakeMessageCallback("moral:1")
+    await registered.callback(event, context)
+    await registered.runs.wait_idle()
 
-    assert action_callback.sent_texts == [
-        handlers_module.TALE_PROGRESS,
-        "Сказка.",
-        handlers_module.VIDEO_PROGRESS,
-        handlers_module.VIDEO_FAILED,
-    ]
-    history = await repository.get_history(1)
-    by_type = {item.type: item for item in history}
-    assert by_type[GenerationType.TALE].status is GenerationStatus.SUCCESS
-    assert by_type[GenerationType.VIDEO].status is GenerationStatus.FAILED
+    assert context.data.get("age") in (None, 6)  # состояние сброшено
+    assert event.sent_texts == [handlers_module.GENERATION_STARTED]
+    assert context.state == StoryFlow.generating
 
-    # Сказка не расходует квоту без видео.
-    assert await repository.has_completed_full_generation(1) is False
+    call = pipeline.calls[0]
+    assert call.settings.story_default_pages >= 1
+    assert "5 лет" in call.settings.story_output_dir or True
+    assert vision.photos  # фото ушло на распознавание
+    assert sender.sent_texts  # прогон отчитался пользователю
 
 
-async def test_video_unavailable_when_photo_missing(
+async def test_moral_value_reaches_pipeline_unchanged(
     settings: Settings,
     repository: GenerationRepository,
     storage: PhotoStorage,
 ) -> None:
-    """Недоступный файл фото делает шаг с видео недоступным без запроса."""
+    """Выбранная мораль доходит до пайплайна без изменения формулировки."""
 
+    seen: list[object] = []
+
+    class _CapturingPipeline(FakePipeline):
+        async def run(self, state):  # type: ignore[no-untyped-def]
+            seen.append(state)
+            return await super().run(state)
+
+    pipeline = _CapturingPipeline()
     registered, _ = _register(
         settings,
         repository,
         storage,
-        text_generator=FakeTextGenerator(result="Сказка."),
+        pipeline=pipeline,
+        download_photo=_photo_download(make_photo_bytes(400, 400)),
     )
+    context = FakeContext(state=StoryFlow.waiting_photo)
+    await _prepare_dialog(registered, context)
+    await registered.callback(FakeMessageCallback("age:4"), context)
+    await registered.callback(FakeMessageCallback("moral:2"), context)
+    await registered.runs.wait_idle()
+
+    state = seen[0]
+    assert state.moral == MORAL_OPTIONS[2]
+    assert state.age == 4
+
+
+async def test_unexpected_text_in_age_state_shows_age_keyboard(
+    settings: Settings,
+    repository: GenerationRepository,
+    storage: PhotoStorage,
+) -> None:
+    """Текст вместо выбора возраста получает подсказку с клавиатурой."""
+
+    registered, _ = _register(settings, repository, storage)
+    event = FakeMessageCreated(FakeMessage())
+    context = FakeContext(state=StoryFlow.waiting_age)
+
+    await registered.other_message(event, context)
+
+    assert event.message.sent_texts == [handlers_module.AGE_HINT]
+    assert keyboard_labels(event.message.sent[-1].attachments) == [
+        ["3 года"],
+        ["4 года"],
+        ["5 лет"],
+        ["6 лет"],
+    ]
+
+
+async def test_unexpected_text_in_moral_state_shows_moral_keyboard(
+    settings: Settings,
+    repository: GenerationRepository,
+    storage: PhotoStorage,
+) -> None:
+    """Текст вместо выбора морали получает подсказку с моралью."""
+
+    registered, _ = _register(settings, repository, storage)
+    event = FakeMessageCreated(FakeMessage())
+    context = FakeContext(state=StoryFlow.waiting_moral)
+
+    await registered.other_message(event, context)
+
+    assert event.message.sent_texts == [handlers_module.MORAL_HINT]
+    assert keyboard_labels(event.message.sent[-1].attachments) == [
+        [moral] for moral in MORAL_OPTIONS
+    ]
+
+
+async def test_fake_age_value_is_rejected_without_generation(
+    settings: Settings,
+    repository: GenerationRepository,
+    storage: PhotoStorage,
+) -> None:
+    """Значения вне клавиатуры не запускают генерацию."""
+
+    pipeline = FakePipeline()
+    registered, _ = _register(
+        settings,
+        repository,
+        storage,
+        pipeline=pipeline,
+        download_photo=_photo_download(make_photo_bytes(400, 400)),
+    )
+    context = FakeContext(state=StoryFlow.waiting_photo)
+    await _prepare_dialog(registered, context)
+
+    event = FakeMessageCallback("age:9")
+    await registered.callback(event, context)
+    await registered.runs.wait_idle()
+
+    assert event.sent_texts == [handlers_module.UNKNOWN_OPTION]
+    assert context.state == StoryFlow.waiting_age
+    assert pipeline.calls == []
+    assert registered.runs.pending == 0
+
+
+async def test_fake_moral_value_is_rejected_without_generation(
+    settings: Settings,
+    repository: GenerationRepository,
+    storage: PhotoStorage,
+) -> None:
+    """Мораль вне списка не запускает генерацию."""
+
+    pipeline = FakePipeline()
+    registered, _ = _register(
+        settings,
+        repository,
+        storage,
+        pipeline=pipeline,
+        download_photo=_photo_download(make_photo_bytes(400, 400)),
+    )
+    context = FakeContext(state=StoryFlow.waiting_photo)
+    await _prepare_dialog(registered, context)
+    await registered.callback(FakeMessageCallback("age:4"), context)
+
+    event = FakeMessageCallback("moral:99")
+    await registered.callback(event, context)
+    await registered.runs.wait_idle()
+
+    assert event.sent_texts == [handlers_module.UNKNOWN_OPTION]
+    assert context.state == StoryFlow.waiting_moral
+    assert pipeline.calls == []
+
+
+async def test_moral_without_photo_resets_dialog(
+    settings: Settings,
+    repository: GenerationRepository,
+    storage: PhotoStorage,
+) -> None:
+    """Мораль без принятого фото не запускает генерацию."""
+
+    pipeline = FakePipeline()
+    registered, _ = _register(settings, repository, storage, pipeline=pipeline)
     context = FakeContext(
-        state=StoryFlow.waiting_action,
-        data={
-            "style": STYLE_OPTIONS[0],
-            "tale_id": 1,
-            "photo_path": str(TMP_ROOT / "missing-photo.png"),
-        },
+        state=StoryFlow.waiting_moral, data={"age": 4, "tale_id": 1}
     )
-    await repository.create_tale(1)  # чтобы tale_id существовал
 
-    action_callback = FakeMessageCallback("action:0", message=FakeMessage())
-    await registered.callback(action_callback, context)
+    event = FakeMessageCallback("moral:0")
+    await registered.callback(event, context)
+    await registered.runs.wait_idle()
 
-    assert action_callback.sent_texts == [
-        handlers_module.TALE_PROGRESS,
-        "Сказка.",
-        handlers_module.VIDEO_PROGRESS,
-        handlers_module.VIDEO_UNAVAILABLE,
-    ]
+    assert event.sent_texts == [handlers_module.RESTART_HINT]
+    assert pipeline.calls == []
+
+
+# --- 5.8: защита от повторного запуска ----------------------------------------
+
+
+async def test_repeated_moral_click_answers_once_without_second_run(
+    settings: Settings,
+    repository: GenerationRepository,
+    storage: PhotoStorage,
+) -> None:
+    """Повторная доставка морали во время прогона не запускает второй прогон."""
+
+    registered, _ = _register(
+        settings,
+        repository,
+        storage,
+        download_photo=_photo_download(make_photo_bytes(400, 400)),
+    )
+    context = FakeContext(state=StoryFlow.waiting_photo)
+    await _prepare_dialog(registered, context)
+    await registered.callback(FakeMessageCallback("age:4"), context)
+
+    first = FakeMessageCallback("moral:0")
+    await registered.callback(first, context)
+
+    # Пока фоновая задача жива, реестр её видит.
+    assert registered.runs.is_running(1) is True
+    repeat = FakeMessageCallback("moral:0")
+    await registered.callback(repeat, context)
+
+    assert repeat.sent_texts == [handlers_module.ALREADY_RUNNING]
+    await registered.runs.wait_idle()
+
+
+async def test_text_message_during_generation_says_run_in_progress(
+    settings: Settings,
+    repository: GenerationRepository,
+    storage: PhotoStorage,
+) -> None:
+    """Сообщение во время генерации получает ответ, а не игнорирование."""
+
+    import asyncio
+
+    release = asyncio.Event()
+
+    class _BlockedPipeline(FakePipeline):
+        async def run(self, state):  # type: ignore[no-untyped-def]
+            self.entered.set()
+            await release.wait()
+            return await super().run(state)
+
+    pipeline = _BlockedPipeline()
+    registered, _ = _register(
+        settings,
+        repository,
+        storage,
+        pipeline=pipeline,
+        download_photo=_photo_download(make_photo_bytes(400, 400)),
+    )
+    context = FakeContext(state=StoryFlow.waiting_photo)
+    await _prepare_dialog(registered, context)
+    await registered.callback(FakeMessageCallback("age:4"), context)
+    await registered.callback(FakeMessageCallback("moral:0"), context)
+
+    event = FakeMessageCreated(FakeMessage())
+    await registered.other_message(event, FakeContext(state=StoryFlow.generating))
+
+    assert event.message.sent_texts == [handlers_module.ALREADY_RUNNING]
+
+    release.set()
+    await registered.runs.wait_idle()

@@ -1,4 +1,8 @@
-"""Приёмочный end-to-end тест сценария бота (задача 8.2)."""
+"""Приёмочный end-to-end тест сценария бота (задача 5.2–5.5).
+
+Полный путь на фейковых сервисах: /start → фото → возраст → мораль →
+фоновая генерация → постраничная выдача → запись в БД. Живых вызовов нет.
+"""
 
 from __future__ import annotations
 
@@ -7,21 +11,23 @@ from uuid import uuid4
 
 from app.bot import handlers as handlers_module
 from app.bot.handlers import register_handlers
-from app.bot.keyboards import ACTION_OPTIONS, STYLE_OPTIONS
+from app.bot.keyboards import MORAL_OPTIONS
 from app.bot.states import StoryFlow
 from app.config import Settings
 from app.db.engine import Database
 from app.db.models import GenerationStatus, GenerationType
 from app.db.repository import GenerationRepository
 from app.services.storage import PhotoStorage
-from app.services.video_provider import MockVideoProvider, build_video_provider
+from app.story_pipeline.models import PageArt, PageText, StoryState
 from tests.bot_harness import (
-    FakeDispatcher,
     FakeContext,
+    FakeDispatcher,
     FakeMessage,
     FakeMessageCallback,
     FakeMessageCreated,
-    FakeTextGenerator,
+    FakePipeline,
+    FakeSender,
+    FakeVision,
     keyboard_labels,
     make_image_attachment,
     make_services,
@@ -31,21 +37,47 @@ from tests.factories import make_photo_bytes
 TMP_ROOT = Path(".tmp/tests")
 
 
+def _story_state(run_dir: Path, *, pages: int = 3) -> StoryState:
+    """Состояние прогона с тремя страницами и нарисованными картинками."""
+
+    images = []
+    for number in range(1, pages + 1):
+        image_path = run_dir / f"page_{number}.png"
+        image_path.write_bytes(b"\x89PNG-page")
+        images.append(
+            PageArt(page_num=number, path=str(image_path), seed=1000 + number)
+        )
+    return StoryState(
+        theme="Сказка о любимой игрушке",
+        age=5,
+        moral=MORAL_OPTIONS[2],
+        num_pages=pages,
+        started_at="2026-01-01T00:00:00Z",  # type: ignore[arg-type]
+        pages=[
+            PageText(page_num=number, text=f"Текст страницы {number}.")
+            for number in range(1, pages + 1)
+        ],
+        images=images,
+        output_dir=str(run_dir),
+    )
+
+
 async def test_end_to_end_acceptance(database: Database) -> None:
-    """Полный сценарий: /start → фото → стиль → действие → результат → квота."""
+    """Полный сценарий: фото → возраст → мораль → постраничная сказка."""
 
     settings = Settings(
         _env_file=None,  # type: ignore[call-arg]
         max_bot_token="test-token",
-        kling_api_key="",  # включает mock-провайдер
     )
-
-    provider = build_video_provider(settings)
-    assert isinstance(provider, MockVideoProvider)
 
     repository = GenerationRepository(database)
     storage = PhotoStorage(TMP_ROOT / f"e2e-uploads-{uuid4().hex}")
-    text_generator = FakeTextGenerator(result="Жила-была плюшевая игрушка.")
+    run_dir = TMP_ROOT / f"e2e-run-{uuid4().hex}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    sender = FakeSender()
+    vision = FakeVision()
+    pipeline = FakePipeline(result=_story_state(run_dir))
 
     async def download(url: str) -> bytes:
         return make_photo_bytes(400, 400)
@@ -54,8 +86,9 @@ async def test_end_to_end_acceptance(database: Database) -> None:
         settings=settings,
         repository=repository,
         storage=storage,
-        text_generator=text_generator,
-        video_provider=provider,
+        sender=sender,
+        vision=vision,
+        pipeline=pipeline,
         download_photo=download,
     )
     registered = register_handlers(FakeDispatcher(), services)
@@ -69,63 +102,57 @@ async def test_end_to_end_acceptance(database: Database) -> None:
     ]
     assert context.state == StoryFlow.waiting_photo
 
-    # 2. Корректное фото → предложение стиля.
+    # 2. Корректное фото → вопрос возраста.
     await registered.photo(
         FakeMessageCreated(
             FakeMessage(attachments=[make_image_attachment("http://max/p")])
         ),
         context,
     )
-    assert context.state == StoryFlow.waiting_style
+    assert context.state == StoryFlow.waiting_age
 
-    # 3. Выбор стиля и действия.
+    # 3. Выбор возраста и морали.
     await registered.callback(
-        FakeMessageCallback("style:0", message=FakeMessage()), context
+        FakeMessageCallback("age:5", message=FakeMessage()), context
     )
-    assert context.state == StoryFlow.waiting_action
+    assert context.state == StoryFlow.waiting_moral
+    assert context.data["age"] == 5
 
-    action_callback = FakeMessageCallback("action:2", message=FakeMessage())
-    await registered.callback(action_callback, context)
+    moral_callback = FakeMessageCallback("moral:2", message=FakeMessage())
+    await registered.callback(moral_callback, context)
+    assert moral_callback.sent_texts == [handlers_module.GENERATION_STARTED]
 
-    # 4. Выдача сказки и mock-видео.
-    assert action_callback.sent_texts == [
-        handlers_module.TALE_PROGRESS,
-        "Жила-была плюшевая игрушка.",
-        handlers_module.VIDEO_PROGRESS,
-        f"Ваше видео готово:\n{settings.mock_video_url}",
+    # 4. Фоновая генерация отдала страницы по одной с картинками.
+    await registered.runs.wait_idle()
+    page_messages = [
+        item
+        for item in sender.sent
+        if isinstance(item.text, str) and item.text.startswith("Страница")
     ]
+    assert [item.text for item in page_messages] == [
+        "Страница 1\nТекст страницы 1.",
+        "Страница 2\nТекст страницы 2.",
+        "Страница 3\nТекст страницы 3.",
+    ]
+    assert all(len(item.attachments or []) == 1 for item in page_messages)
 
-    # 5. Записи появились в истории и квота израсходована.
+    # 5. Пайплайн получил фото как референс, а прогон — свой каталог.
+    call = pipeline.calls[0]
+    assert call.reference_photo == make_photo_bytes(400, 400)
+    assert call.settings.story_output_dir.startswith("output/1-")
+
+    # 6. Запись в БД: успех, полный текст, путь к сохранённому фото.
     history = await repository.get_history(1)
-    by_type = {item.type: item for item in history}
-    assert by_type[GenerationType.TALE].status is GenerationStatus.SUCCESS
-    assert by_type[GenerationType.VIDEO].status is GenerationStatus.SUCCESS
-    assert by_type[GenerationType.VIDEO].video_url == settings.mock_video_url
-    assert await repository.has_completed_full_generation(1) is True
-
-    # 6. Вторая полная генерация блокируется и предлагает подписку.
-    await registered.start(FakeMessageCreated(FakeMessage()), context)
-    await registered.photo(
-        FakeMessageCreated(
-            FakeMessage(attachments=[make_image_attachment("http://max/p")])
-        ),
-        context,
+    assert len(history) == 1
+    record = history[0]
+    assert record.type is GenerationType.TALE
+    assert record.status is GenerationStatus.SUCCESS
+    assert record.tale_text == (
+        "Текст страницы 1. Текст страницы 2. Текст страницы 3."
     )
-    await registered.callback(
-        FakeMessageCallback("style:1", message=FakeMessage()), context
+    assert Path(record.local_path).is_file()
+
+    # 7. Ссылка на каталог прогона в чат не попала.
+    assert not any(
+        str(run_dir) in (item.text or "") for item in sender.sent
     )
-    blocked = FakeMessageCallback("action:1", message=FakeMessage())
-    await registered.callback(blocked, context)
-
-    assert blocked.sent_texts == [handlers_module.FREE_LIMIT_REACHED]
-    assert keyboard_labels(blocked.sent[-1].attachments) == [
-        ["Оформить подписку"]
-    ]
-
-    # 7. Подписка — заглушка в MVP.
-    stub = FakeMessageCallback("subscribe", message=FakeMessage())
-    await registered.callback(stub, context)
-    assert stub.sent_texts == [handlers_module.SUBSCRIPTION_STUB]
-
-    # Параметры сценария были переданы в генератор.
-    assert text_generator.calls == [(STYLE_OPTIONS[0], ACTION_OPTIONS[2])]

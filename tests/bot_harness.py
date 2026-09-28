@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 from maxapi.types.attachments.image import Image
 
@@ -12,7 +18,13 @@ from app.config import Settings
 from app.db.repository import GenerationRepository
 from app.services.photo_validation import PhotoValidator
 from app.services.storage import PhotoStorage
-from app.services.video_provider import VideoJob, VideoResult
+from app.services.toy_vision import ToyDescription
+from app.story_pipeline.models import StoryState
+from app.story_pipeline.settings import StorySettings
+
+# Каталог для файлов иллюстраций в заглушках пайплайна: временный, внутри
+# репозитория, ничего не коммитится.
+TMP_DIR = Path(".tmp/tests")
 
 
 class FakeMessage:
@@ -56,6 +68,49 @@ class FakeMessageCreated:
             self.message.recipient.chat_id,
             self.message.sender.user_id,
         )
+
+
+def default_story_state(
+    *,
+    status: str = "ok",
+    pages: int = 1,
+    illustrated: tuple[int, ...] | None = None,
+) -> StoryState:
+    """Состояние прогона с указанными страницами и файлами иллюстраций.
+
+    Файлы пишутся в `output_dir`, который по умолчанию — временный каталог
+    pytest: тесты диалога не проверяют содержимое картинок, но должны иметь
+    файлы на диске, иначе ветка выдачи страниц уходит в «файл не найден».
+    """
+
+    from app.story_pipeline.models import PageArt, PageText
+
+    output_dir = Path(TMP_DIR) / f"pages-{uuid4().hex}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    illustrated = (
+        tuple(range(1, pages + 1)) if illustrated is None else illustrated
+    )
+    images: list[PageArt] = []
+    for number in illustrated:
+        image_path = output_dir / f"page_{number}.png"
+        image_path.write_bytes(b"\x89PNG-page")
+        images.append(
+            PageArt(page_num=number, path=str(image_path), seed=1000 + number)
+        )
+    return StoryState(
+        theme="Сказка о любимой игрушке",
+        age=4,
+        moral="делиться с другими",
+        num_pages=pages,
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        pages=[
+            PageText(page_num=number, text=f"Текст страницы {number}.")
+            for number in range(1, pages + 1)
+        ],
+        images=images,
+        output_dir=str(output_dir),
+        status=status,  # type: ignore[arg-type]
+    )
 
 
 class FakeBotStarted:
@@ -193,56 +248,102 @@ class FakeDispatcher:
         return decorator
 
 
-class FakeTextGenerator:
-    """Заглушка генератора сказки."""
+class FakeSender:
+    """Заглушка `ChatSender`: пишет исходящие сообщения по `chat_id`."""
+
+    def __init__(self) -> None:
+        self.sent: list[SimpleNamespace] = []
+
+    async def send(
+        self,
+        chat_id: int,
+        text: str | None = None,
+        attachments: list[Any] | None = None,
+    ) -> None:
+        self.sent.append(
+            SimpleNamespace(chat_id=chat_id, text=text, attachments=attachments)
+        )
+
+    @property
+    def sent_texts(self) -> list[str | None]:
+        return [item.text for item in self.sent]
+
+
+class FakeVision:
+    """Заглушка `ToyVisionService` с заранее заданным описанием игрушки."""
 
     def __init__(
         self,
-        result: str = "Жила-была плюшевая игрушка...",
+        description: ToyDescription | None = None,
         error: Exception | None = None,
+    ) -> None:
+        self.description = description or ToyDescription(
+            kind="плюшевый медвежонок",
+            color="рыжий",
+            material="мягкая ткань",
+            features="кисточка на голове, красный шарф",
+            short="рыжий плюшевый медвежонок в красном шарфе",
+        )
+        self.error = error
+        self.photos: list[bytes] = []
+        self.closed = 0
+
+    async def describe(self, photo: bytes) -> ToyDescription:
+        self.photos.append(photo)
+        if self.error is not None:
+            raise self.error
+        return self.description
+
+    async def aclose(self) -> None:
+        self.closed += 1
+
+
+@dataclass
+class FakePipelineCall:
+    """Аргументы, с которыми собрана заглушка пайплайна."""
+
+    settings: Any
+    reference_photo: bytes | None
+    on_stage: Any
+
+
+class FakePipeline:
+    """Заглушка `StoryPipeline`: повторяет этапы и отдаёт заданное состояние."""
+
+    def __init__(
+        self,
+        result: StoryState | None = None,
+        error: Exception | None = None,
+        stage_names: tuple[str, ...] = ("plan", "screenwrite", "illustrate"),
     ) -> None:
         self.result = result
         self.error = error
-        self.calls: list[tuple[str, str]] = []
+        self.stage_names = stage_names
+        self.closed = 0
+        self.stages: list[str] = []
+        self.entered = asyncio.Event()
+        # Аргументы сборки: тесты проверяют референс, настройки и колбэк.
+        self.calls: list[FakePipelineCall] = []
+        self._on_stage: Any = None
 
-    async def generate(
-        self,
-        *,
-        style: str,
-        action: str,
-        toy_description: str | None = None,
-    ) -> str:
-        self.calls.append((style, action))
+    def bind(self, call: FakePipelineCall) -> None:
+        self.calls.append(call)
+        self._on_stage = call.on_stage
+
+    async def run(self, state: StoryState) -> StoryState:
+        self.entered.set()
+        if self._on_stage is not None:
+            for name in self.stage_names:
+                self.stages.append(name)
+                await self._on_stage(name)
         if self.error is not None:
             raise self.error
+        if self.result is None:  # pragma: no cover - опечатка в тесте
+            raise AssertionError("Результат прогона не задан")
         return self.result
 
-
-class FakeVideoProvider:
-    """Заглушка видеопровайдера."""
-
-    def __init__(
-        self,
-        video_url: str = "https://cdn.example.com/video.mp4",
-        create_error: Exception | None = None,
-        wait_error: Exception | None = None,
-    ) -> None:
-        self.video_url = video_url
-        self.create_error = create_error
-        self.wait_error = wait_error
-        self.created_with: list[tuple[str, str]] = []
-        self.request_id = "req-fake"
-
-    async def create_video(self, image_base64: str, action: str) -> VideoJob:
-        if self.create_error is not None:
-            raise self.create_error
-        self.created_with.append((image_base64, action))
-        return VideoJob(request_id=self.request_id)
-
-    async def wait_for_video(self, request_id: str) -> VideoResult:
-        if self.wait_error is not None:
-            raise self.wait_error
-        return VideoResult(video_url=self.video_url)
+    async def aclose(self) -> None:
+        self.closed += 1
 
 
 def make_image_attachment(url: str) -> Image:
@@ -259,23 +360,49 @@ def make_services(
     settings: Settings,
     repository: GenerationRepository,
     storage: PhotoStorage,
-    text_generator: Any | None = None,
-    video_provider: Any | None = None,
+    sender: Any | None = None,
+    vision: Any | None = None,
+    pipeline: FakePipeline | None = None,
+    story_settings: StorySettings | None = None,
     download_photo: Any | None = None,
 ) -> BotServices:
-    """Собрать `BotServices` с фейковыми внешними сервисами."""
+    """Собрать `BotServices` с фейковыми внешними сервисами.
+
+    `pipeline` — заглушка пайплайна; её состояние прогона задаёт тест. Если
+    заглушка не передана, используется общая: она отдаёт состояние с одной
+    страницей без иллюстрации, чего достаточно для тестов диалога.
+    """
 
     async def _download(url: str) -> bytes:  # pragma: no cover - подмена
         raise AssertionError("download_photo не должен вызываться в тесте")
+
+    stub = pipeline if pipeline is not None else FakePipeline()
+
+    def make_pipeline(
+        *,
+        settings: StorySettings,
+        reference_photo: bytes | None,
+        on_stage: Any,
+    ) -> FakePipeline:
+        stub.bind(
+            FakePipelineCall(
+                settings=settings,
+                reference_photo=reference_photo,
+                on_stage=on_stage,
+            )
+        )
+        return stub
 
     return BotServices(
         settings=settings,
         validator=PhotoValidator(settings),
         storage=storage,
-        text_generator=text_generator or FakeTextGenerator(),
-        video_provider=video_provider or FakeVideoProvider(),
         repository=repository,
         download_photo=download_photo or _download,
+        sender=sender or FakeSender(),
+        vision=vision or FakeVision(),
+        make_pipeline=make_pipeline,
+        story_settings=story_settings or StorySettings(_env_file=None),  # type: ignore[call-arg]
     )
 
 
@@ -287,3 +414,22 @@ def keyboard_labels(attachments: list[Any] | None) -> list[list[str]]:
     markup = attachments[0]
     buttons = markup.payload.buttons
     return [[button.text for button in row] for row in buttons]
+
+
+SenderFactory = Callable[[], Any]
+
+
+__all__ = [
+    "FakeContext",
+    "FakeDispatcher",
+    "FakeMessage",
+    "FakeMessageCallback",
+    "FakeMessageCreated",
+    "FakePipeline",
+    "FakePipelineCall",
+    "FakeSender",
+    "FakeVision",
+    "keyboard_labels",
+    "make_image_attachment",
+    "make_services",
+]

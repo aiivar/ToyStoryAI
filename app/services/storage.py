@@ -55,6 +55,29 @@ class PhotoStorage:
 
         return path
 
+    def read_bytes(self, path: str | Path) -> bytes:
+        """Прочитать сохранённый файл по пути.
+
+        Отдельный метод нужен фоновой генерации: пайплайн и распознавание
+        работают с байтами фотографии, а не с путём, и читать файл должен
+        сервис хранения, а не обработчик события.
+        """
+
+        file_path = Path(path)
+        try:
+            data = file_path.read_bytes()
+        except OSError as exc:
+            raise PhotoStorageError(
+                "Не удалось прочитать сохранённое фото. Пришлите фото ещё раз.",
+                reason="read",
+            ) from exc
+        if not data:
+            raise PhotoStorageError(
+                "Сохранённое фото пустое. Пришлите фото ещё раз.",
+                reason="empty",
+            )
+        return data
+
     def encode_base64(self, path: str | Path) -> str:
         """Прочитать сохранённый файл и закодировать его в base64.
 
