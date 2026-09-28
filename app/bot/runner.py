@@ -102,6 +102,23 @@ PARTIAL_RESULT = (
     f"Причина: {PARTIAL_REASON}."
 )
 
+# Итог прогона, у которого на месте все картинки, а текст остался с
+# замечаниями: `needs_review` ставится ещё и при исчерпании бюджета ревизий,
+# и тогда книжка доставлена целиком. Называть это «не полной» нельзя: родитель
+# получил все страницы с картинками, и правда здесь только про текст.
+#
+# Причина в чате — тоже своя, про текст: заимствовать `PARTIAL_REASON` значило
+# бы соврать, что картинку отрисовать не вышло. Техническая причина из метрик
+# уходит в лог и в запись о прогоне.
+REVIEW_TITLE = "К сожалению, в тексте сказки остались замечания"
+REVIEW_REASON = "текст не удалось довести до идеала за отведённое число попыток"
+REVIEW_RESULT = (
+    f"{REVIEW_TITLE}: {REVIEW_REASON}. Проверка это заметила, а переписать "
+    "текст было уже нельзя — попытки кончились.\n"
+    "Книжка при этом собрана целиком: все страницы на месте и все с "
+    "иллюстрациями, читайте её как обычно."
+)
+
 # Повторная попытка предлагается один раз: без ограничения переделки
 # разошлись бы по цене.
 PARTIAL_REDO = (
@@ -416,7 +433,7 @@ class StoryRunner:
             await self._deliver_pages(send, state)
             await send(STORY_READY)
         else:
-            await self._deliver_partial(request, send, state, run_dir)
+            await self._deliver_degraded(request, send, state, run_dir)
 
         logger.info(
             "Прогон {} завершён: страниц={} статус={} каталог={}",
@@ -439,12 +456,77 @@ class StoryRunner:
         for page in sorted(state.pages, key=lambda item: item.page_num):
             await self._send_page(send, state, page.page_num, page.text)
 
+    async def _deliver_degraded(
+        self,
+        request: RunRequest,
+        send: SendFunc,
+        state: StoryState,
+        run_dir: str,
+    ) -> None:
+        """Отдать прогон со статусом «требует проверки».
+
+        Статус означает одно из двух, и разница видна пользователю:
+
+        - страницы без иллюстраций — книжка не доставлена, квота не
+          начисляется, повтор предлагается один раз (см. `_deliver_partial`);
+        - все страницы на месте, замечания остались к тексту — книжка
+          доставлена целиком, поэтому она засчитывается как завершённая
+          сказка и повтор не предлагается (см. `_deliver_reviewed`).
+        """
+
+        missing = sorted(
+            set(range(1, state.num_pages + 1))
+            - {art.page_num for art in state.images}
+        )
+        if not missing:
+            await self._deliver_reviewed(request, send, state, run_dir)
+            return
+        await self._deliver_partial(request, send, state, run_dir, missing)
+
+    async def _deliver_reviewed(
+        self,
+        request: RunRequest,
+        send: SendFunc,
+        state: StoryState,
+        run_dir: str,
+    ) -> None:
+        """Отдать книжку, которой не хватило только качества текста.
+
+        Иллюстрации на месте, значит продукт доставлен: родитель получил все
+        страницы с картинками, и списывать за это бесплатную сказку было бы
+        нечестно в обратную сторону — бесплатная книжка была бы недоплачена.
+        Поэтому запись закрывается как `SUCCESS`, квота расходуется, а повтор
+        не предлагается: он всё равно был бы отклонён квотой.
+
+        Техническая причина из метрик остаётся в записи и в логе — она нужна
+        разбору, но пользователю про HTTP-коды провайдера знать нечего.
+        """
+
+        reason = self._technical_reason(state)
+        logger.warning(
+            "Прогон {} отдан с замечаниями к тексту: страниц без иллюстраций "
+            "нет, причина={}",
+            request.tale_id,
+            reason,
+        )
+        await self._record_state(
+            request,
+            state,
+            output_dir=run_dir,
+            status=GenerationStatus.SUCCESS,
+            error=reason,
+        )
+        await self._deliver_pages(send, state)
+        await send(REVIEW_RESULT)
+        await send(STORY_READY)
+
     async def _deliver_partial(
         self,
         request: RunRequest,
         send: SendFunc,
         state: StoryState,
         run_dir: str,
+        missing: Sequence[int],
     ) -> None:
         """Отдать частичный результат и один раз предложить начать заново.
 
@@ -453,10 +535,6 @@ class StoryRunner:
         иначе неограниченные переделки разошлись бы по цене.
         """
 
-        missing = sorted(
-            set(range(1, state.num_pages + 1))
-            - {art.page_num for art in state.images}
-        )
         reason = self._technical_reason(state)
         logger.warning(
             "Прогон {} частичный: страниц без картинки={} причина={}",

@@ -932,6 +932,113 @@ async def test_partial_result_reason_has_russian_fallback(
     assert "None" not in summary
 
 
+async def test_reviewed_text_with_all_pictures_is_not_called_partial(
+    tmp_path: Path,
+) -> None:
+    """Все картинки на месте: книжка полная, а не «частичный результат».
+
+    Статус `needs_review` ставится и при исчерпании бюджета ревизий, когда
+    иллюстрирование идёт штатно. Раньше такая книжка доставлялась целиком,
+    а следом приходило «без картинок остались страницы » с пустым списком и
+    выдуманной причиной про отказ сервиса картинок.
+    """
+
+    state = made_state(tmp_path, status="needs_review", pages=2)
+    state.metrics.append(
+        StageMetrics(
+            stage="quality",
+            duration_ms=10.0,
+            error="judge: passed=false after 2 revisions",
+        )
+    )
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request(tale_id=11))
+
+    texts = [text for text in bundle.bot.sent_texts if text]
+    assert not any(text.startswith(runner_module.PARTIAL_TITLE) for text in texts)
+    summary = next(
+        text for text in texts if text.startswith(runner_module.REVIEW_TITLE)
+    )
+    # Причина в чате — про текст, а не про отказ сервиса картинок.
+    assert runner_module.PARTIAL_REASON not in summary
+    assert "отрисовать" not in summary
+    assert "не полной" not in summary
+    # Техническая причина сорвавшегося этапа — в запись и лог, но не в чат.
+    assert "judge: passed=false" not in summary
+    update = bundle.repository.updates[-1]
+    assert "judge: passed=false" in str(update["error"])
+    # Страницы с картинками доставлены все.
+    delivered = page_messages(bundle.bot)
+    assert [item.text for item in delivered] == [
+        "Страница 1\nТекст страницы 1.",
+        "Страница 2\nТекст страницы 2.",
+    ]
+    assert all(item.attachments for item in delivered)
+
+
+async def test_reviewed_text_book_consumes_quota(tmp_path: Path) -> None:
+    """Книга отдана целиком — она засчитывается как завершённая сказка.
+
+    Квота привязана к статусу `SUCCESS` (`has_completed_story`). Книжка со
+    всеми страницами и картинками — это продукт, который пользователь получил,
+    поэтому и статус, и квота обязаны говорить одно и то же.
+    """
+
+    bundle = make_runner(
+        pipeline=RecordingPipeline(
+            result=made_state(tmp_path, status="needs_review", pages=2)
+        )
+    )
+
+    await bundle.runner.run(make_request(tale_id=12))
+
+    update = bundle.repository.updates[-1]
+    assert update["status"] is GenerationStatus.SUCCESS
+    assert update["pages_count"] == 2
+    assert update["tale_text"] == "Текст страницы 1. Текст страницы 2."
+
+
+async def test_reviewed_text_book_offers_no_redo(tmp_path: Path) -> None:
+    """Переделывать нечего: книжка отдана, а квота уже израсходована."""
+
+    bundle = make_runner(
+        pipeline=RecordingPipeline(
+            result=made_state(tmp_path, status="needs_review", pages=2)
+        )
+    )
+
+    await bundle.runner.run(make_request())
+
+    assert runner_module.PARTIAL_REDO not in bundle.bot.sent_texts
+    assert runner_module.STORY_READY in bundle.bot.sent_texts
+
+
+async def test_missing_page_still_refuses_quota_and_names_pages(
+    tmp_path: Path,
+) -> None:
+    """Без одной картинки поведение прежнее: `FAILED`, номера и повтор."""
+
+    state = made_state(
+        tmp_path, status="needs_review", pages=3, illustrated=(1, 3)
+    )
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request(tale_id=13))
+
+    summary = next(
+        text
+        for text in bundle.bot.sent_texts
+        if text and text.startswith(runner_module.PARTIAL_TITLE)
+    )
+    assert "2" in summary
+    assert runner_module.PARTIAL_REASON in summary
+    update = bundle.repository.updates[-1]
+    assert update["status"] is GenerationStatus.FAILED
+    assert update["error"]
+    assert runner_module.PARTIAL_REDO in bundle.bot.sent_texts
+
+
 async def test_partial_result_offers_redo_with_restart_keyboard(
     tmp_path: Path,
 ) -> None:
