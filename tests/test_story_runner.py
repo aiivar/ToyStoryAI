@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -1037,6 +1038,108 @@ async def test_missing_page_still_refuses_quota_and_names_pages(
     assert update["status"] is GenerationStatus.FAILED
     assert update["error"]
     assert runner_module.PARTIAL_REDO in bundle.bot.sent_texts
+
+
+async def test_user_is_told_even_if_recording_fails(tmp_path: Path) -> None:
+    """Сбой записи в БД не съедает сообщение пользователю.
+
+    Запись идёт после отправки, поэтому сломанная БД не может оставить
+    родителя в тишине после «Запускаю сказку!».
+    """
+
+    class BrokenRepository(FakeRepository):
+        async def update_result(
+            self, generation_id: int, **kwargs: Any
+        ) -> None:
+            raise RuntimeError("база недоступна")
+
+    bundle = make_runner(
+        pipeline=RecordingPipeline(
+            result=made_state(
+                tmp_path, status="needs_review", pages=2, illustrated=(1,)
+            )
+        ),
+        repository=BrokenRepository(),
+    )
+
+    await bundle.runner.run(make_request())
+
+    assert any(
+        runner_module.PARTIAL_TITLE in (text or "")
+        for text in bundle.bot.sent_texts
+    )
+
+
+async def test_vision_failure_message_survives_broken_database(
+    tmp_path: Path,
+) -> None:
+    """То же для отказа по распознаванию игрушки."""
+
+    from app.services.toy_vision import PermanentToyVisionError
+
+    class BrokenRepository(FakeRepository):
+        async def update_result(
+            self, generation_id: int, **kwargs: Any
+        ) -> None:
+            raise RuntimeError("база недоступна")
+
+    bundle = make_runner(
+        pipeline=RecordingPipeline(result=made_state(tmp_path)),
+        vision=FakeVision(error=PermanentToyVisionError("не разглядел")),
+        repository=BrokenRepository(),
+    )
+
+    await bundle.runner.run(make_request())
+
+    assert bundle.bot.sent_texts == [runner_module.VISION_FAILED]
+
+
+async def test_run_directory_contains_story_json(tmp_path: Path) -> None:
+    """Каталог прогона получает `story.json` — как и в CLI (D19).
+
+    Без него каталог бота остаётся набором картинок: ни сцен, ни вердиктов
+    судьи, ни метрик этапов, а поддержка работает именно с каталогом.
+    """
+
+    settings = StorySettings(
+        _env_file=None,  # type: ignore[call-arg]
+        story_output_dir=str(tmp_path / "runs"),
+    )
+    bundle = make_runner(
+        pipeline=RecordingPipeline(
+            result=made_state(
+                tmp_path, status="needs_review", pages=2, illustrated=(1,)
+            )
+        ),
+        settings=settings,
+    )
+
+    await bundle.runner.run(make_request())
+
+    run_dir = Path(bundle.repository.updates[-1]["output_dir"])
+    payload = json.loads((run_dir / "story.json").read_text("utf-8"))
+    assert payload["status"] == "needs_review"
+    assert [page["page_num"] for page in payload["pages"]] == [1, 2]
+
+
+async def test_story_json_failure_does_not_break_the_run(
+    tmp_path: Path,
+) -> None:
+    """Незаписываемый `story.json` — не повод ронять выдачу результата."""
+
+    settings = StorySettings(
+        _env_file=None,  # type: ignore[call-arg]
+        story_output_dir=str(tmp_path / "runs" / "page.png"),
+    )
+    bundle = make_runner(
+        pipeline=RecordingPipeline(result=made_state(tmp_path, pages=2)),
+        settings=settings,
+    )
+
+    await bundle.runner.run(make_request())
+
+    assert bundle.repository.updates[-1]["status"] is GenerationStatus.SUCCESS
+    assert runner_module.STORY_READY in bundle.bot.sent_texts
 
 
 async def test_partial_result_offers_redo_with_restart_keyboard(

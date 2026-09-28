@@ -43,6 +43,7 @@ from app.bot.story_request import (
 from app.db.models import GenerationStatus
 from app.db.repository import GenerationRepository
 from app.services.toy_vision import ToyVisionService
+from app.story_pipeline.artifacts import write_story_json
 from app.story_pipeline.models import StoryState
 from app.story_pipeline.pipeline import StageCallback, StoryPipeline
 from app.story_pipeline.providers.image import make_image_provider
@@ -302,14 +303,11 @@ class StoryRunner:
         пользователя ответ: он уже отправлен, здесь только фиксируем факт.
         """
 
-        try:
-            await self._record(
-                request,
-                status=GenerationStatus.FAILED,
-                error=QUOTA_REFUSAL_ERROR,
-            )
-        except Exception as exc:  # noqa: BLE001 - БД тоже может лежать
-            logger.error("Не удалось записать отказ по квоте: {}", exc)
+        await self._record_quietly(
+            request,
+            status=GenerationStatus.FAILED,
+            error=QUOTA_REFUSAL_ERROR,
+        )
 
     # --- Запуск и остановка ---------------------------------------------
 
@@ -372,7 +370,12 @@ class StoryRunner:
 
         Проверка квоты идёт первым шагом, до распознавания: распознавание
         игрушки — платный вызов, и запускать его пользователю, которому
-        сказка уже выдана, незачем.
+        сказка уже выдана, незачем. Обработчик проверяет квоту и раньше (чтобы
+        отказ не пришёл следом за обещанием), но здесь она остаётся как
+        единственная гарантия отсутствия платного вызова.
+
+        Во всех ветках с отказом сообщение уходит ДО записи в БД: сломанная
+        база не должна отнимать у родителя ответ после «Запускаю сказку!».
         """
 
         send = self._sender_for(request.chat_id)
@@ -382,15 +385,15 @@ class StoryRunner:
                 "Квота пользователя {} израсходована, прогон не запускаю",
                 request.user_id,
             )
+            await send(
+                FREE_LIMIT_REACHED, [build_subscription_keyboard().as_markup()]
+            )
             # Запись о прогоне закрываем сразу: иначе она навсегда осталась бы
             # «в работе», хотя платной работы не было.
-            await self._record(
+            await self._record_quietly(
                 request,
                 status=GenerationStatus.FAILED,
                 error=QUOTA_REFUSAL_ERROR,
-            )
-            await send(
-                FREE_LIMIT_REACHED, [build_subscription_keyboard().as_markup()]
             )
             return
 
@@ -398,10 +401,10 @@ class StoryRunner:
             description = await self._vision.describe(request.photo)
         except Exception as exc:  # noqa: BLE001 - сеть и LLM любят удивлять
             logger.error("Распознавание игрушки не удалось: {}", exc)
-            await self._record(
+            await send(VISION_FAILED, [build_restart_keyboard().as_markup()])
+            await self._record_quietly(
                 request, status=GenerationStatus.FAILED, error=str(exc)
             )
-            await send(VISION_FAILED, [build_restart_keyboard().as_markup()])
             return
 
         # Сборка настроек, состояния и пайплайна идёт внутри `try`:
@@ -447,26 +450,32 @@ class StoryRunner:
             state = await pipeline.run(state)
         except Exception as exc:  # noqa: BLE001 - обрыв фоновой задачи
             logger.error("Прогон сказки сорвался: {}", exc)
-            await self._record(
+            await send(GENERATION_FAILED, [build_restart_keyboard().as_markup()])
+            await self._record_quietly(
                 request,
                 status=GenerationStatus.FAILED,
                 error=str(exc),
                 output_dir=run_dir or None,
             )
-            await send(GENERATION_FAILED, [build_restart_keyboard().as_markup()])
             return
         finally:
             await self._close_quietly(pipeline)
 
+        # Полное состояние прогона в каталоге: без него разбор бота и
+        # поддержка видят только картинки, но не сцены, вердикты судьи и
+        # метрики этапов. Запись лучше для пользователя, чем его молчание,
+        # поэтому сбой файла лишь логируется.
+        self._write_story_json_quietly(run_dir, state)
+
         if state.status == "ok":
-            await self._record_state(
+            await self._deliver_pages(send, state)
+            await send(STORY_READY)
+            await self._record_state_quietly(
                 request,
                 state,
                 output_dir=run_dir,
                 status=GenerationStatus.SUCCESS,
             )
-            await self._deliver_pages(send, state)
-            await send(STORY_READY)
         else:
             await self._deliver_degraded(request, send, state, run_dir)
 
@@ -544,16 +553,16 @@ class StoryRunner:
             request.tale_id,
             reason,
         )
-        await self._record_state(
+        await self._deliver_pages(send, state)
+        await send(REVIEW_RESULT)
+        await send(STORY_READY)
+        await self._record_state_quietly(
             request,
             state,
             output_dir=run_dir,
             status=GenerationStatus.SUCCESS,
             error=reason,
         )
-        await self._deliver_pages(send, state)
-        await send(REVIEW_RESULT)
-        await send(STORY_READY)
 
     async def _deliver_partial(
         self,
@@ -577,17 +586,17 @@ class StoryRunner:
             numbers_text(missing),
             reason,
         )
-        await self._record_state(
+        await self._deliver_pages(send, state)
+        await send(
+            PARTIAL_RESULT.format(numbers=numbers_text(missing)),
+            [build_restart_keyboard().as_markup()],
+        )
+        await self._record_state_quietly(
             request,
             state,
             output_dir=run_dir,
             status=GenerationStatus.FAILED,
             error=reason,
-        )
-        await self._deliver_pages(send, state)
-        await send(
-            PARTIAL_RESULT.format(numbers=numbers_text(missing)),
-            [build_restart_keyboard().as_markup()],
         )
         if request.user_id in self._redo_offered:
             logger.info(
@@ -718,6 +727,71 @@ class StoryRunner:
             pages_count=pages_count,
             output_dir=output_dir,
         )
+
+    async def _record_quietly(
+        self,
+        request: RunRequest,
+        *,
+        status: GenerationStatus,
+        error: str | None = None,
+        output_dir: str | None = None,
+    ) -> None:
+        """Записать исход прогона, не давая сбою БД прервать общение.
+
+        Вызывается только после того, как пользователь уже получил ответ:
+        запись в БД — учёт, а не условие того, что человек что-то увидит.
+        Сломанная база в логе, но не тишина в чате.
+        """
+
+        try:
+            await self._record(
+                request, status=status, error=error, output_dir=output_dir
+            )
+        except Exception as exc:  # noqa: BLE001 - БД тоже может лежать
+            logger.error(
+                "Не удалось записать исход прогона {}: {}", request.tale_id, exc
+            )
+
+    async def _record_state_quietly(
+        self,
+        request: RunRequest,
+        state: StoryState,
+        *,
+        output_dir: str,
+        status: GenerationStatus,
+        error: str | None = None,
+    ) -> None:
+        """То же для записи по состоянию пайплайна."""
+
+        try:
+            await self._record_state(
+                request,
+                state,
+                output_dir=output_dir,
+                status=status,
+                error=error,
+            )
+        except Exception as exc:  # noqa: BLE001 - БД тоже может лежать
+            logger.error(
+                "Не удалось записать исход прогона {}: {}", request.tale_id, exc
+            )
+
+    @staticmethod
+    def _write_story_json_quietly(run_dir: str, state: StoryState) -> None:
+        """Записать ``story.json`` в каталог прогона, не роняя выдачу.
+
+        Артефакт нужен поддержке, а не пользователю: отказ файловой системы
+        не должен превращать доставленную книжку в сбой прогона.
+        """
+
+        if not run_dir:
+            return
+        try:
+            write_story_json(run_dir, state)
+        except (OSError, TypeError, ValueError) as exc:
+            logger.warning(
+                "Не удалось записать story.json прогона: {}", exc
+            )
 
     async def _record_state(
         self,
