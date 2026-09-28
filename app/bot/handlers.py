@@ -33,7 +33,8 @@ from app.bot.keyboards import (
     parse_age_payload,
     parse_moral_payload,
 )
-from app.bot.runner import RunRequest, StoryRunner
+from app.bot.messaging import ChatSender
+from app.bot.runner import PipelineFactory, RunRequest, StoryRunner
 from app.bot.states import StoryFlow
 from app.config import Settings
 from app.db.repository import GenerationRepository
@@ -112,9 +113,9 @@ class BotServices:
     storage: PhotoStorage
     repository: GenerationRepository
     download_photo: DownloadFunc
-    sender: Any
+    sender: ChatSender
     vision: ToyVisionService
-    make_pipeline: Any
+    make_pipeline: PipelineFactory
     story_settings: StorySettings
 
 
@@ -454,6 +455,8 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
             await _callback_send(event, PHOTO_UNREADABLE)
             return
 
+        await context.update_data(moral=moral)
+
         request = RunRequest(
             user_id=user_id,
             chat_id=_callback_chat_id(event, user_id),
@@ -468,10 +471,10 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
             return
 
         await _callback_send(event, GENERATION_STARTED)
-        # Диалог сброшен: следующий выбор морали уже не должен запускать
-        # второй прогон, а состояние `generating` защищает от повторных
-        # нажатий во время работы фоновой задачи.
-        await context.clear()
+        # Параметры (возраст, мораль, фото) остаются в состоянии — по спецификации
+        # диалог должен их помнить, — но состояние уходит в `generating`:
+        # повторный выбор морали отсюда уже не запускает прогон, а реестр
+        # отсекает второй запуск, пока идёт первый.
         await context.set_state(StoryFlow.generating)
 
     async def on_callback(

@@ -38,6 +38,7 @@ from app.bot.story_request import (
     join_pages_text,
 )
 from app.db.models import GenerationStatus
+from app.db.repository import GenerationRepository
 from app.services.toy_vision import ToyVisionService
 from app.story_pipeline.models import StoryState
 from app.story_pipeline.pipeline import StageCallback, StoryPipeline
@@ -199,7 +200,7 @@ class StoryRunner:
     def __init__(
         self,
         *,
-        repository: Any,
+        repository: GenerationRepository,
         vision: ToyVisionService,
         make_pipeline: PipelineFactory,
         story_settings: StorySettings,

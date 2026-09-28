@@ -304,15 +304,15 @@ async def test_full_dialog_stores_age_and_moral_and_runs_generation(
     await registered.callback(event, context)
     await registered.runs.wait_idle()
 
-    assert context.data.get("age") in (None, 6)  # состояние сброшено
+    # Возраст и мораль остаются в состоянии диалога (требование спецификации).
+    assert context.data["age"] == 6
+    assert context.data["moral"] == MORAL_OPTIONS[1]
     assert event.sent_texts == [handlers_module.GENERATION_STARTED]
     assert context.state == StoryFlow.generating
 
-    call = pipeline.calls[0]
-    assert call.settings.story_default_pages >= 1
-    assert "5 лет" in call.settings.story_output_dir or True
-    assert vision.photos  # фото ушло на распознавание
-    assert sender.sent_texts  # прогон отчитался пользователю
+    # Фото ушло на распознавание и прогон отчитался пользователю.
+    assert vision.photos == [make_photo_bytes(400, 400)]
+    assert sender.sent_texts
 
 
 async def test_moral_value_reaches_pipeline_unchanged(
