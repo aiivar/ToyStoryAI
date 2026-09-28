@@ -27,20 +27,23 @@
 - `toy-vision`: распознавание игрушки по фото через DeepSeek с изображением и выдача `ToyDescription` как единого источника правды об образе героя.
 - `storybook-bot-flow`: диалог выбора возраста и морали, постраничная выдача сказки с картинками, сообщения о прогрессе, фоновое выполнение генерации, запись результата и блокировка по квоте.
 
-### Затронутые capability открытого изменения `add-toy-story-max-bot`
-`openspec/specs/` пока пуст: capability существующего бота описаны незаархивированным изменением `add-toy-story-max-bot`. Это изменение не правит их дельтами, а явно меняет их судьбу:
+### Затронутые capability открытых изменений
+`openspec/specs/` пока пуст: capability описаны незаархивированными изменениями `add-toy-story-max-bot` (бот) и `add-story-pipeline` (пайплайн), поэтому дельты `MODIFIED`/`REMOVED` сейчас недоступны. Это изменение не правит их дельтами, а явно меняет их судьбу:
 - `toy-animation` — **удаляется целиком** вместе с кодом и настройками.
-- `tale-generation` — перестаёт быть отдельным вызовом на 150–300 слов; текст сказки производит пайплайн `story_pipeline`.
+- `tale-generation` — перестаёт быть отдельным вызовом на 150–300 слов; текст сказки производит пайплайн `story_pipeline`, а `TextGenerator` удаляется как недостижимый код.
+- `toy-photo-intake` — требование «изображение в base64 для видеопровайдера» теряет смысл: фото по-прежнему принимается и валидируется, но уходит в пайплайн как reference-изображение для иллюстраций.
 - `bot-conversation` — вместо выбора стиля и действия пользователь выбирает возраст и мораль, а результат выдаётся постранично с картинками.
-- `usage-limits` — бесплатная единица меняется с «сказка + видео» на «одна завершённая сказка».
-- `generation-history` — запись генерации получает число страниц и каталог вывода.
+- `usage-limits` — бесплатная единица меняется с «сказка + видео» на «одна завершённая сказка»; старые успешные сказки засчитываются.
+- `generation-history` — запись генерации получает число страниц, каталог вывода и полный текст сказки.
+- `story-illustration` (пайплайн) — character sheet теперь создаётся с фото ребёнка как единственным reference, а страницы — с character sheet.
+- `story-orchestration` (пайплайн) — пайплайн принимает фото-референс и необязательный асинхронный колбэк прогресса.
 
 ## Impact
 
 - **Новый код**: `app/story_pipeline/providers/image.py` (провайдер RouterAI), `app/services/toy_vision.py`, изменения в `app/story_pipeline/prompts.py`, `stages/image_generator.py`, `pipeline.py`, `app/bot/{handlers,keyboards,states}.py`, `app/config.py`, `app/main.py`, `app/db/{models,repository}.py`.
-- **Удаляемый код**: `app/services/video_provider.py` и его тесты, `KLING_*` из `app/config.py`, `.env.example`, `README.md`, `scripts/smoke.py`, `app/main.py`, `app/bot/handlers.py`.
+- **Удаляемый код**: `app/services/video_provider.py` и его тесты, `KLING_*` из `app/config.py`, `.env.example`, `README.md`, `scripts/smoke.py`, `app/main.py`, `app/bot/handlers.py`; `GeminiImageProvider` с настройками `GEMINI_*`; `TextGenerator` и его тесты; `PhotoStorage.encode_base64`; видеоколонки, `GenerationType.VIDEO` и `create_video` в репозитории.
 - **Внешние API**: DeepSeek (`api.deepseek.com`) — текст всех этапов пайплайна плюс vision-вызов; RouterAI (`routerai.ru/api/v1`) — изображения. Прямой Google AI Studio больше не используется.
 - **Новые зависимости**: нет. Всё на уже зафиксированных `httpx`, `pydantic`, `tenacity`, `loguru`, `maxapi`.
-- **Новые переменные окружения**: `ROUTERAI_API_KEY`, `ROUTERAI_BASE_URL`, `ROUTERAI_IMAGE_MODEL`, `STORY_IMAGE_ASPECT_RATIO`; удаляются `KLING_*`.
+- **Новые переменные окружения**: `ROUTERAI_API_KEY`, `ROUTERAI_BASE_URL`, `ROUTERAI_IMAGE_MODEL`, `STORY_IMAGE_ASPECT_RATIO`; удаляются `KLING_*` и `GEMINI_*`.
 - **Стоимость**: одна сказка = 1 vision-вызов + 5–7 текстовых вызовов DeepSeek + 7 генераций изображений ≈ 26 ₽ картинок плюс текст. При пустом `ROUTERAI_API_KEY` изображения мокаются, расхода нет.
-- **Данные**: `bot.db` пополнится колонками `pages_count` и `output_dir`; схема создаётся при старте, существующие строки сохраняются, перенос данных не требуется.
+- **Данные**: `bot.db` требует лёгкой миграции — `create_all` не добавляет колонки в существующие таблицы, поэтому при старте выполняется `ALTER TABLE … ADD COLUMN` для `pages_count` и `output_dir`. Существующие строки сохраняются и учитываются в квоте.
