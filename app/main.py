@@ -8,16 +8,21 @@ from maxapi import Bot, Dispatcher
 from maxapi.exceptions import InvalidToken, MaxApiError, MaxConnection
 
 from app.bot.handlers import BotServices, register_handlers
+from app.bot.messaging import ChatSender
+from app.bot.runner import build_story_pipeline
 from app.config import Settings
 from app.db.engine import Database
 from app.db.repository import GenerationRepository
 from app.services.photo_validation import PhotoValidator
 from app.services.storage import PhotoStorage
-from app.services.text_generator import TextGenerator
-from app.services.video_provider import build_video_provider
+from app.services.toy_vision import ToyVisionService
+from app.story_pipeline.settings import StorySettings
 from app.utils.logger import get_logger, setup_logging
 
 logger = get_logger()
+
+# Размер mock-картинки: заглушка провайдера рисует квадрат этого размера.
+MOCK_IMAGE_SIZE = 32
 
 
 async def main() -> int:
@@ -32,12 +37,13 @@ async def main() -> int:
 
     repository = GenerationRepository(database)
     storage = PhotoStorage(settings.uploads_dir)
-    text_generator = TextGenerator(settings)
-    video_provider = build_video_provider(settings)
+    story_settings = StorySettings()
 
-    if not settings.kling_api_key:
+    if not settings.routerai_api_key:
         logger.warning(
-            "KLING_API_KEY не задан: используется mock-видеопровайдер."
+            "ROUTERAI_API_KEY не задан: страницы будут с mock-картинками "
+            f"{MOCK_IMAGE_SIZE}×{MOCK_IMAGE_SIZE}. Такой результат нельзя "
+            "показывать пользователям — задайте ключ RouterAI."
         )
     if not settings.deepseek_api_key:
         logger.warning(
@@ -54,16 +60,26 @@ async def main() -> int:
     )
     dispatcher = Dispatcher()
 
+    # Отправитель привязан к боту, а не к событию: фоновой генерации нужно
+    # писать в чат спустя минуты после апдейта, когда событие уже мертво.
+    sender = ChatSender(bot)
+    vision = ToyVisionService(settings)
+
     services = BotServices(
         settings=settings,
         validator=PhotoValidator(settings),
         storage=storage,
-        text_generator=text_generator,
-        video_provider=video_provider,
         repository=repository,
         download_photo=bot.download_bytes,
+        sender=sender,
+        vision=vision,
+        make_pipeline=build_story_pipeline,
+        story_settings=story_settings,
     )
-    register_handlers(dispatcher, services)
+    # Раннер собирается при регистрации обработчиков и возвращается наружу:
+    # при остановке polling именно он должен сообщить незавершённым прогонам
+    # о прерывании (D17).
+    handlers = register_handlers(dispatcher, services)
 
     exit_code = 0
     try:
@@ -80,10 +96,11 @@ async def main() -> int:
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Остановка по запросу пользователя.")
     finally:
-        await text_generator.aclose()
-        aclose = getattr(video_provider, "aclose", None)
-        if aclose is not None:
-            await aclose()
+        # Уведомление и отмена идут до закрытия провайдеров: иначе
+        # пользователь ждал бы молча, а провайдеры закрылись бы под ногами
+        # ещё идущего платного прогона.
+        await handlers.runs.shutdown()
+        await vision.aclose()
         await database.dispose()
         logger.info("Сервисы остановлены.")
 

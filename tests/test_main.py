@@ -25,6 +25,23 @@ class _FailingDispatcher(Dispatcher):
         raise InvalidToken("invalid token")
 
 
+class _RecordingBot:
+    """Заглушка `Bot`, запоминающая аргументы конструктора."""
+
+    # Аргументы последнего собранного бота: тесты проверяют флаги
+    # auto_requests/auto_check_subscriptions, не поднимая сеть.
+    last_kwargs: dict = {}
+
+    def __init__(self, **kwargs: object) -> None:
+        _RecordingBot.last_kwargs = dict(kwargs)
+
+    async def download_bytes(self, url: str) -> bytes:  # pragma: no cover
+        return b""
+
+    async def send_message(self, **kwargs: object) -> None:  # pragma: no cover
+        return None
+
+
 async def test_main_exits_gracefully_on_invalid_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -44,6 +61,74 @@ async def test_main_exits_gracefully_on_invalid_token(
     db_path.unlink(missing_ok=True)
 
 
+async def test_main_warns_about_mock_images_without_routerai_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Без `ROUTERAI_API_KEY` при старте есть предупреждение про mock 32×32."""
+
+    from loguru import logger as loguru_logger
+
+    TMP_ROOT.mkdir(parents=True, exist_ok=True)
+    db_path = TMP_ROOT / f"mock-{uuid4().hex}.db"
+    messages: list[str] = []
+
+    monkeypatch.setenv("MAX_BOT_TOKEN", "invalid-token")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    monkeypatch.setenv("UPLOADS_DIR", str(TMP_ROOT / "mock-uploads"))
+    monkeypatch.setenv("ROUTERAI_API_KEY", "")
+    monkeypatch.setattr(main_module, "Dispatcher", _FailingDispatcher)
+    monkeypatch.setattr(main_module, "Bot", _RecordingBot)
+    # `setup_logging` пересоздаёт приёмники loguru, поэтому подменяем его:
+    # предупреждение всё равно уходит в тот же логгер.
+    monkeypatch.setattr(main_module, "setup_logging", lambda settings: None)
+    sink_id = loguru_logger.add(
+        lambda message: messages.append(str(message)),
+        level="WARNING",
+    )
+    try:
+        code = await main_module.main()
+    finally:
+        loguru_logger.remove(sink_id)
+
+    assert code == 1
+    warnings = [text for text in messages if "ROUTERAI_API_KEY" in text]
+    assert warnings, "Ожидалось предупреждение о mock-картинках"
+    assert "32×32" in warnings[0]
+    db_path.unlink(missing_ok=True)
+
+
+async def test_main_does_not_warn_when_routerai_key_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """С заданным ключом RouterAI предупреждения о mock-картинках нет."""
+
+    from loguru import logger as loguru_logger
+
+    TMP_ROOT.mkdir(parents=True, exist_ok=True)
+    db_path = TMP_ROOT / f"real-{uuid4().hex}.db"
+    messages: list[str] = []
+
+    monkeypatch.setenv("MAX_BOT_TOKEN", "invalid-token")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    monkeypatch.setenv("UPLOADS_DIR", str(TMP_ROOT / "real-uploads"))
+    monkeypatch.setenv("ROUTERAI_API_KEY", "test-key")
+    monkeypatch.setattr(main_module, "Dispatcher", _FailingDispatcher)
+    monkeypatch.setattr(main_module, "Bot", _RecordingBot)
+    monkeypatch.setattr(main_module, "setup_logging", lambda settings: None)
+    sink_id = loguru_logger.add(
+        lambda message: messages.append(str(message)),
+        level="WARNING",
+    )
+    try:
+        code = await main_module.main()
+    finally:
+        loguru_logger.remove(sink_id)
+
+    assert code == 1
+    assert not [text for text in messages if "ROUTERAI_API_KEY" in text]
+    db_path.unlink(missing_ok=True)
+
+
 async def test_main_disables_auto_requests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -51,15 +136,6 @@ async def test_main_disables_auto_requests(
 
     TMP_ROOT.mkdir(parents=True, exist_ok=True)
     db_path = TMP_ROOT / f"cli-{uuid4().hex}.db"
-    captured: dict = {}
-
-    class _RecordingBot:
-        def __init__(self, **kwargs: object) -> None:
-            captured.update(kwargs)
-
-        async def download_bytes(self, url: str) -> bytes:  # pragma: no cover
-            return b""
-
     monkeypatch.setenv("MAX_BOT_TOKEN", "invalid-token")
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
     monkeypatch.setenv("UPLOADS_DIR", str(TMP_ROOT / "cli-uploads"))
@@ -69,8 +145,8 @@ async def test_main_disables_auto_requests(
     code = await main_module.main()
 
     assert code == 1
-    assert captured["auto_requests"] is False
-    assert captured["auto_check_subscriptions"] is False
+    assert _RecordingBot.last_kwargs["auto_requests"] is False
+    assert _RecordingBot.last_kwargs["auto_check_subscriptions"] is False
     db_path.unlink(missing_ok=True)
 
 
