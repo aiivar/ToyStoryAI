@@ -39,7 +39,6 @@ from app.story_pipeline.stages.prompt_builder import (
     build_art_prompt,
     build_character_sheet_prompt,
 )
-from app.utils.image_mime import MIME_PNG
 
 # Seed character sheet: не совпадает ни с одной страницей и постоянен между
 # прогонами, поэтому mock рисует для него стабильную картинку. Провайдеры,
@@ -76,9 +75,12 @@ def character_sheet_filename(media_type: str | None = None) -> str:
     return f"character_sheet{file_extension(media_type)}"
 
 
-# Тип файла, когда провайдер его не сообщил: PNG — историческое умолчание
-# mock- и Gemini-провайдеров, поэтому прогон остаётся рабочим.
-DEFAULT_MEDIA_TYPE = MIME_PNG
+# Расширение по умолчанию, когда тип файла узнать не удалось: PNG —
+# историческое умолчание mock- и Gemini-провайдеров, поэтому прогон
+# остаётся рабочим. Задано расширением, а не MIME-типом, потому что
+# функция возвращает именно расширение, а тип из ответа провайдера при
+# этом может отсутствовать или быть нечитаемым.
+_DEFAULT_EXTENSION = ".png"
 
 # Соответствие MIME-типов и расширений файлов. `image/jpeg` по RFC пишется
 # и `.jpg`, и `.jpeg`; выбран короткий вариант, его понимают все клиенты.
@@ -103,13 +105,13 @@ def file_extension(media_type: str | None) -> str:
 
     normalized = (media_type or "").strip().lower()
     if not normalized:
-        return _MEDIA_TYPE_EXTENSIONS[DEFAULT_MEDIA_TYPE]
+        return _DEFAULT_EXTENSION
     if normalized in _MEDIA_TYPE_EXTENSIONS:
         return _MEDIA_TYPE_EXTENSIONS[normalized]
     subtype = normalized.rpartition("/")[2]
     safe = "".join(char for char in subtype if char.isalnum())
     if not safe:
-        return _MEDIA_TYPE_EXTENSIONS[DEFAULT_MEDIA_TYPE]
+        return _DEFAULT_EXTENSION
     return f".{safe}"
 
 
@@ -299,7 +301,6 @@ class ImageGeneratorStage:
 __all__ = [
     "CHARACTER_SHEET_ASPECT_RATIO",
     "CHARACTER_SHEET_SEED",
-    "DEFAULT_MEDIA_TYPE",
     "PAGE_SEED_BASE",
     "ImageGeneratorStage",
     "character_sheet_filename",

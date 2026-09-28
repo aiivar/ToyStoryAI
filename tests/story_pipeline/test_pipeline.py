@@ -16,9 +16,11 @@ import httpx
 import pytest
 from loguru import logger
 
+from app.story_pipeline import pipeline as pipeline_module
 from app.story_pipeline.errors import (
     PermanentImageGenerationError,
     PermanentLLMError,
+    TransientImageGenerationError,
 )
 from app.story_pipeline.models import (
     Character,
@@ -322,6 +324,112 @@ async def test_on_stage_completes_before_next_stage_starts(
         "notify-done:scene",
         "notify-done:quality",
     ]
+
+
+async def test_failing_on_stage_does_not_abort_the_run(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Сбой отправителя не выбрасывает оплаченный прогон и не чинит статус.
+
+    Отправитель — внешний код (сеть мессенджера, таймаут), и его сбой не
+    имеет отношения к качеству сказки. До отправки прогресс-сообщения были
+    потрачены деньги на генерацию, поэтому прогон доводится до конца, а
+    ошибка попадает в лог. Ложный `ok` при реальном сбое (пропущенные
+    страницы) тоже невозможен: статус выставляют этапы.
+    """
+
+    messages: list[str] = []
+    sink_id = logger.add(
+        lambda message: messages.append(str(message)),
+        level="WARNING",
+        format="{message}",
+    )
+    provider = fake_image_provider(
+        responses=[
+            GeneratedImage(data=b"sheet", seed=1),
+            TransientImageGenerationError("таймаут провайдера"),
+            GeneratedImage(data=b"page-2", seed=3),
+        ]
+    )
+
+    async def on_stage(name: str) -> None:
+        raise RuntimeError(f"мессенджер недоступен на этапе {name}")
+
+    try:
+        pipeline = StoryPipeline(
+            fake_llm(_ok_responses()),
+            provider,
+            story_settings(story_output_dir=str(tmp_path)),
+            on_stage=on_stage,
+        )
+        state = _state()
+
+        result = await pipeline.run(state)
+    finally:
+        logger.remove(sink_id)
+
+    # Прогон не прерван: этап иллюстрирования выполнен до конца.
+    assert result is state
+    assert provider.calls, "этапы после сбоя отправителя не выполнялись"
+    assert state.finished_at is not None
+    # Реальный сбой страницы отражён в статусе, а не замаскирован под `ok`.
+    assert state.status == "needs_review"
+    assert state.metrics[-1].error is not None
+    # Ошибка отправителя залогирована вместе с именем этапа.
+    joined = "\n".join(messages)
+    assert "мессенджер недоступен на этапе plan" in joined
+
+
+async def test_on_stage_failure_does_not_report_false_ok_on_full_success(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Сбой отправителя на полностью успешном прогоне не меняет статус `ok`."""
+
+    async def on_stage(name: str) -> None:
+        raise RuntimeError("отправитель молча упал")
+
+    pipeline = StoryPipeline(
+        fake_llm(_ok_responses()),
+        fake_image_provider(),
+        story_settings(story_output_dir=str(tmp_path)),
+        on_stage=on_stage,
+    )
+    state = _state()
+
+    await pipeline.run(state)
+
+    # Сказка цела: падение сообщения о прогрессе не отменяет результат.
+    assert state.status == "ok"
+    assert [art.page_num for art in state.images] == [1, 2]
+
+
+async def test_stage_callback_alias_is_exported_for_bot_sender(
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """`StageCallback` публичен: N5 аннотирует им своего отправителя."""
+
+    assert "StageCallback" in pipeline_module.__all__
+
+    async def on_stage(name: str) -> None:
+        return None
+
+    sender: pipeline_module.StageCallback = on_stage
+    pipeline = StoryPipeline(
+        fake_llm([]),
+        fake_image_provider(),
+        story_settings(story_output_dir="output"),
+        on_stage=sender,
+    )
+
+    assert pipeline is not None
 
 
 async def test_run_without_callback_is_unchanged(

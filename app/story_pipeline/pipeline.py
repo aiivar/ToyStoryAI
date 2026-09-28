@@ -115,6 +115,8 @@ class StoryPipeline:
         помечают результат сами и не бросают исключений; `failed` же означает,
         что прогон не смог выдать результат и завершился типизированной
         ошибкой, которую оркестратор пробрасывает наружу без подмены типа.
+        Наружу уходит только `StoryPipelineError`: сбой колбэка `on_stage`
+        ловится в `_notify_stage` и лишь логируется.
         """
 
         state.started_at = datetime.now(timezone.utc)
@@ -169,15 +171,32 @@ class StoryPipeline:
             raise first_error
 
     async def _notify_stage(self, stage_name: str) -> None:
-        """Сообщить о начале этапа, если колбэк передан.
+        """Сообщить о начале этапа, если колбэк передан, и не дать сбою
+        отправителя выбросить прогон.
 
         Вызов `await`-ится намеренно: сообщение пользователю должно уйти
         до того, как начнётся платная работа этапа. Без колбэка метод —
         дешёвый no-op, лишних await в прогоне не появляется.
+
+        Ошибка колбэка ловится целиком и превращается в предупреждение в
+        лог. Отправитель — внешний код (сеть мессенджера, таймаут), и его
+        сбой ничего не говорит о качестве сказки: к моменту рисования
+        деньги уже потрачены, и терять все картинки из-за неотправленного
+        сообщения о прогрессе нельзя. Статус прогона при этом не
+        подменяется — его выставляют этапы, поэтому ложный `ok` на
+        частично неудачном прогоне появиться не может.
         """
 
-        if self._on_stage is not None:
+        if self._on_stage is None:
+            return
+        try:
             await self._on_stage(stage_name)
+        except Exception as exc:  # noqa: BLE001 - прогресс не роняет прогон
+            logger.warning(
+                "pipeline: on_stage callback failed before stage {}: {}",
+                stage_name,
+                exc,
+            )
 
     async def _run_stage(self, stage: Stage, state: StoryState) -> None:
         """Выполнить узел, залогировав вход/выход, время и расход токенов."""
@@ -213,4 +232,4 @@ def _flag(value: object) -> str:
     return "yes" if value is not None else "no"
 
 
-__all__ = ["StoryPipeline"]
+__all__ = ["StageCallback", "StoryPipeline"]

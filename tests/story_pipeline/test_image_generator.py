@@ -253,6 +253,19 @@ async def test_missing_media_type_falls_back_to_png_name(
     assert state.metrics[-1].error is None
 
 
+def test_default_extension_is_png_for_unusable_media_types() -> None:
+    """Единственная константа умолчания: `.png` для пустого и мусорного типа."""
+
+    from app.story_pipeline.stages import image_generator
+
+    default_extension = image_generator._DEFAULT_EXTENSION
+
+    assert default_extension == ".png"
+    # Умолчание не завязано на MIME-таблицу: те же значения для всех веток.
+    for media_type in (None, "", "   ", "/", "image/"):
+        assert page_filename(2, media_type) == f"page_2{default_extension}"
+
+
 def test_extension_helpers_map_media_types_without_path_separators() -> None:
     """Хелперы имени файла устойчивы к пустому и неожиданному типу."""
 
