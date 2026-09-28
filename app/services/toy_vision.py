@@ -10,6 +10,12 @@
 Ошибки сервиса — собственная таксономия `ToyVisionError`, чтобы граница бота
 не зависела от ошибок внутреннего LLM-клиента пайплайна.
 
+Вендорскую часть (обёртка markdown, таблица «статус → повторяется или нет»)
+сервис не изобретает, а берёт из `app/utils/chat_completions.py` — тем же
+путём, каким её берёт LLM-клиент пайплайна. Дублировать правила вендора в двух
+клиентах опасно: они разъезжаются при первом же изменении, и один из клиентов
+начинает молча повторять запросы с неверным ключом.
+
 Модель распознавания — та же, что и для текста сказки (`deepseek_model`):
 отдельная vision-модель в проекте не настроена, а описание игрушки — это та же
 задача «спросить DeepSeek и получить строгий JSON», только с картинкой.
@@ -18,7 +24,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 import httpx
@@ -29,8 +34,15 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
+from tenacity.wait import WaitBaseT
 
 from app.config import Settings
+from app.utils.chat_completions import (
+    PERMANENT_STATUS_CODES,
+    StatusCategory,
+    classify_status,
+    parse_json_object,
+)
 from app.utils.image_mime import UnsupportedImageTypeError, image_data_uri
 from app.utils.logger import get_logger
 
@@ -39,15 +51,6 @@ logger = get_logger()
 # Низкая температура: описание — источник правды для всех последующих
 # промптов, и дрейфовать между прогонами оно не должно.
 VISION_TEMPERATURE = 0.2
-
-# Возможная markdown-обёртка вокруг JSON: ```json … ``` или ``` … ```.
-_CODE_FENCE_RE = re.compile(
-    r"^```[a-zA-Z0-9_-]*\s*(?P<body>.*?)\s*```$", re.DOTALL
-)
-
-# HTTP-статусы, при которых повтор бессмыслен: аутентификация и валидация.
-# Сюда попадает и отказ модели принимать изображения.
-PERMANENT_STATUS_CODES = frozenset({400, 401, 403, 404, 422})
 
 # Задание модели: только по изображению, без домыслов, кратко.
 TOY_VISION_PROMPT = (
@@ -66,6 +69,16 @@ TOY_VISION_PROMPT = (
     ' "short": "одно короткое предложение-описание (до 15 слов), пригодное '
     'как тема для сказки"}'
 )
+
+
+def _finish_reason(data: Any) -> str | None:
+    """Достать `finish_reason` первого выбора; отсутствие допустимо."""
+
+    try:
+        reason = data["choices"][0].get("finish_reason")
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return None
+    return reason if isinstance(reason, str) else None
 
 
 class ToyDescription(BaseModel):
@@ -105,13 +118,13 @@ class ToyVisionService:
         client: httpx.AsyncClient | None = None,
         *,
         max_attempts: int = 2,
-        retry_wait: Any | None = None,
+        retry_wait: WaitBaseT | None = None,
     ) -> None:
         self._settings = settings
         self._client = client
         self._owns_client = client is None
         self._max_attempts = max_attempts
-        self._retry_wait = (
+        self._retry_wait: WaitBaseT = (
             retry_wait
             if retry_wait is not None
             else wait_exponential(multiplier=0.5, min=0.5, max=8)
@@ -125,10 +138,14 @@ class ToyVisionService:
         `photo` — содержимое файла (JPEG, PNG или WebP); тип определяется по
         сигнатуре, а не по имени. Изображение уходит как data URI: без
         публичного URL и без промежуточного файла на диске.
+
+        Сначала проверяется конфигурация (ключ), потом формат байт: отсутствие
+        ключа — это поломка настройки, и она важнее любых разбирательств о
+        картинке, поэтому диагностика не должна зависеть от содержимого фото.
         """
 
-        data_uri = self._build_data_uri(photo)
         self._require_api_key()
+        data_uri = self._build_data_uri(photo)
         description = await self._request_with_retries(data_uri)
         logger.info(
             "Toy recognized: model={} kind={} short={}",
@@ -240,7 +257,7 @@ class ToyVisionService:
                 f"(HTTP {response.status_code}): {response.text[:300]}"
             )
 
-        if response.status_code == 429 or response.status_code >= 500:
+        if classify_status(response.status_code) is StatusCategory.TRANSIENT:
             raise TransientToyVisionError(
                 "DeepSeek временно недоступен "
                 f"(HTTP {response.status_code}): {response.text[:300]}"
@@ -270,23 +287,23 @@ class ToyVisionService:
             raise PermanentToyVisionError(
                 "DeepSeek вернул пустое описание игрушки."
             )
+
+        # Обрезанный по max_tokens ответ почти всегда невалиден: говорить о
+        # нём «не соответствует схеме» значит свалить вину на модель, хотя
+        # виноват лимит токенов, и подсказать пользователю нечего.
+        if _finish_reason(data) == "length":
+            raise PermanentToyVisionError(
+                "DeepSeek не успел дописать описание игрушки: ответ "
+                "оборвался на лимите DEEPSEEK_MAX_TOKENS."
+            )
         return content
-
-    @staticmethod
-    def _strip_code_fence(content: str) -> str:
-        """Снять markdown-обёртку блока кода, как это делает LLM-клиент."""
-
-        match = _CODE_FENCE_RE.match(content.strip())
-        if match is None:
-            return content.strip()
-        return match.group("body").strip()
 
     @classmethod
     def _parse(cls, content: str) -> ToyDescription:
         """Разобрать описание по схеме, не подставляя выдуманных значений."""
 
         try:
-            payload = json.loads(cls._strip_code_fence(content))
+            payload = parse_json_object(content)
         except json.JSONDecodeError as exc:
             raise PermanentToyVisionError(
                 f"DeepSeek вернул описание не в JSON: {exc}"

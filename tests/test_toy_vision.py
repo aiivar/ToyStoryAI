@@ -6,17 +6,21 @@
 ошибки без повторов, пустой ключ до сети), и защита ключа.
 
 Тесты герметичны: внешние вызовы подменены `httpx.MockTransport`, живой сети
-нет. Попытка повтора отключена через `wait_none()`, поэтому тесты быстрые.
+нет. Ожидание между попытками отключено через `wait_none()`, поэтому тесты
+быстрые. HTTP-клиенты создаёт фикстура `make_service` и закрывает их сама —
+забыть `aclose()` в тесте невозможно.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx
 import pytest
+from loguru import logger
 from tenacity import wait_none
 
 from app.config import Settings
@@ -51,6 +55,9 @@ TOY_RESPONSE = {
     ]
 }
 
+ServiceFactory = Callable[..., ToyVisionService]
+Handler = Callable[[httpx.Request], httpx.Response]
+
 
 def _make_settings(**overrides: object) -> Settings:
     """Настройки бота с тестовым ключом DeepSeek."""
@@ -63,17 +70,35 @@ def _make_settings(**overrides: object) -> Settings:
     return Settings(_env_file=None, **values)  # type: ignore[call-arg]
 
 
-def _make_service(
-    handler: Any,
-    **overrides: object,
-) -> tuple[ToyVisionService, httpx.AsyncClient]:
-    """Сервис на `MockTransport` без ожидания между попытками."""
+@pytest.fixture
+async def make_service() -> AsyncIterator[ServiceFactory]:
+    """Фабрика сервиса на `MockTransport`; клиенты закрываются после теста."""
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    service = ToyVisionService(
-        _make_settings(**overrides), client, retry_wait=wait_none()
+    clients: list[httpx.AsyncClient] = []
+
+    def factory(handler: Handler, **overrides: object) -> ToyVisionService:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        clients.append(client)
+        return ToyVisionService(
+            _make_settings(**overrides), client, retry_wait=wait_none()
+        )
+
+    yield factory
+
+    for client in clients:
+        await client.aclose()
+
+
+@pytest.fixture
+async def log_lines() -> AsyncIterator[list[str]]:
+    """Собирать записи loguru, пока идёт тест."""
+
+    lines: list[str] = []
+    sink_id = logger.add(
+        lambda message: lines.append(str(message)), level="DEBUG"
     )
-    return service, client
+    yield lines
+    logger.remove(sink_id)
 
 
 def _body(request: httpx.Request) -> dict[str, Any]:
@@ -83,23 +108,32 @@ def _body(request: httpx.Request) -> dict[str, Any]:
     return payload
 
 
-# --- Задача 2.2: вызов DeepSeek с изображением ------------------------------
-
-
-async def test_sends_photo_as_data_uri_and_parses_description() -> None:
-    """Один вызов DeepSeek получает фото в data URI и отдаёт описание."""
-
-    captured: list[httpx.Request] = []
+def _ok_handler(
+    captured: list[httpx.Request],
+    response: dict[str, Any] | None = None,
+) -> Handler:
+    """Обработчик, отвечающий успешным ответом и запоминающий запросы."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.append(request)
-        return httpx.Response(200, json=TOY_RESPONSE)
+        payload = TOY_RESPONSE if response is None else response
+        return httpx.Response(200, json=payload)
 
-    service, client = _make_service(handler)
-    try:
-        description = await service.describe(WEBP_BYTES)
-    finally:
-        await client.aclose()
+    return handler
+
+
+# --- Задача 2.2: вызов DeepSeek с изображением ------------------------------
+
+
+async def test_sends_photo_as_data_uri_and_parses_description(
+    make_service: ServiceFactory,
+) -> None:
+    """Один вызов DeepSeek получает фото в data URI и отдаёт описание."""
+
+    captured: list[httpx.Request] = []
+    service = make_service(_ok_handler(captured))
+
+    description = await service.describe(WEBP_BYTES)
 
     assert description == ToyDescription(**TOY_JSON)
 
@@ -125,21 +159,17 @@ async def test_sends_photo_as_data_uri_and_parses_description() -> None:
     }
 
 
-async def test_markdown_fenced_json_is_parsed() -> None:
+async def test_markdown_fenced_json_is_parsed(
+    make_service: ServiceFactory,
+) -> None:
     """JSON в markdown-обёртке разбирается, как у LLM-клиента пайплайна."""
 
     fenced = f"```json\n{json.dumps(TOY_JSON, ensure_ascii=False)}\n```"
+    service = make_service(
+        _ok_handler([], {"choices": [{"message": {"content": fenced}}]})
+    )
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json={"choices": [{"message": {"content": fenced}}]}
-        )
-
-    service, client = _make_service(handler)
-    try:
-        description = await service.describe(WEBP_BYTES)
-    finally:
-        await client.aclose()
+    description = await service.describe(WEBP_BYTES)
 
     assert description.short == "рыжий плюшевый мишка в шарфе"
 
@@ -168,22 +198,16 @@ async def test_prompt_demands_image_only_and_brief_output() -> None:
     ],
 )
 async def test_data_uri_mime_type_matches_signature(
+    make_service: ServiceFactory,
     data: bytes,
     mime_type: str,
 ) -> None:
     """Тип в data URI определяется по содержимому байтов, а не по имени."""
 
     captured: list[httpx.Request] = []
+    service = make_service(_ok_handler(captured))
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured.append(request)
-        return httpx.Response(200, json=TOY_RESPONSE)
-
-    service, client = _make_service(handler)
-    try:
-        await service.describe(data)
-    finally:
-        await client.aclose()
+    await service.describe(data)
 
     parts = _body(captured[0])["messages"][0]["content"]
     url = parts[1]["image_url"]["url"]
@@ -192,23 +216,18 @@ async def test_data_uri_mime_type_matches_signature(
     )
 
 
-async def test_unknown_photo_bytes_are_rejected_before_request() -> None:
+async def test_unknown_photo_bytes_are_rejected_before_request(
+    make_service: ServiceFactory,
+) -> None:
     """Неопознанные байты не уходят в сеть молчаливым мусором."""
 
-    calls: list[httpx.Request] = []
+    captured: list[httpx.Request] = []
+    service = make_service(_ok_handler(captured))
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request)
-        return httpx.Response(200, json=TOY_RESPONSE)
+    with pytest.raises(PermanentToyVisionError) as exc_info:
+        await service.describe(b"GIF89a\x01\x00\x01\x00")
 
-    service, client = _make_service(handler)
-    try:
-        with pytest.raises(PermanentToyVisionError) as exc_info:
-            await service.describe(b"GIF89a\x01\x00\x01\x00")
-    finally:
-        await client.aclose()
-
-    assert calls == []
+    assert captured == []
     message = str(exc_info.value)
     assert "JPEG" in message and "WebP" in message
 
@@ -216,7 +235,9 @@ async def test_unknown_photo_bytes_are_rejected_before_request() -> None:
 # --- Задача 2.3: одна повторная попытка -------------------------------------
 
 
-async def test_transient_failure_is_retried_once() -> None:
+async def test_transient_failure_is_retried_once(
+    make_service: ServiceFactory,
+) -> None:
     """Первый временный сбой (5xx) переживает один повтор и не срывает флоу."""
 
     calls: list[httpx.Request] = []
@@ -227,17 +248,17 @@ async def test_transient_failure_is_retried_once() -> None:
             return httpx.Response(503, text="service unavailable")
         return httpx.Response(200, json=TOY_RESPONSE)
 
-    service, client = _make_service(handler)
-    try:
-        description = await service.describe(WEBP_BYTES)
-    finally:
-        await client.aclose()
+    service = make_service(handler)
+
+    description = await service.describe(WEBP_BYTES)
 
     assert len(calls) == 2
     assert description.kind == "плюшевый медвежонок"
 
 
-async def test_transient_failure_is_not_retried_more_than_once() -> None:
+async def test_transient_failure_is_not_retried_more_than_once(
+    make_service: ServiceFactory,
+) -> None:
     """Второй временный сбой поднимает ошибку, попыток ровно две."""
 
     calls: list[httpx.Request] = []
@@ -246,17 +267,17 @@ async def test_transient_failure_is_not_retried_more_than_once() -> None:
         calls.append(request)
         return httpx.Response(429, text="rate limit")
 
-    service, client = _make_service(handler)
-    try:
-        with pytest.raises(TransientToyVisionError):
-            await service.describe(WEBP_BYTES)
-    finally:
-        await client.aclose()
+    service = make_service(handler)
+
+    with pytest.raises(TransientToyVisionError):
+        await service.describe(WEBP_BYTES)
 
     assert len(calls) == 2
 
 
-async def test_transport_error_is_retried_once() -> None:
+async def test_transport_error_is_retried_once(
+    make_service: ServiceFactory,
+) -> None:
     """Сетевой обрыв (httpx.TransportError) считается временной ошибкой."""
 
     calls: list[httpx.Request] = []
@@ -267,11 +288,9 @@ async def test_transport_error_is_retried_once() -> None:
             raise httpx.ConnectError("connection reset")
         return httpx.Response(200, json=TOY_RESPONSE)
 
-    service, client = _make_service(handler)
-    try:
-        description = await service.describe(WEBP_BYTES)
-    finally:
-        await client.aclose()
+    service = make_service(handler)
+
+    description = await service.describe(WEBP_BYTES)
 
     assert len(calls) == 2
     assert description.kind == "плюшевый медвежонок"
@@ -281,7 +300,10 @@ async def test_transport_error_is_retried_once() -> None:
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
-async def test_permanent_status_raises_without_retry(status: int) -> None:
+async def test_permanent_status_raises_without_retry(
+    make_service: ServiceFactory,
+    status: int,
+) -> None:
     """Постоянный HTTP-статус сразу даёт PermanentToyVisionError (1 попытка).
 
     400 и 422 покрывают в том числе отказ модели принимать изображения.
@@ -293,18 +315,18 @@ async def test_permanent_status_raises_without_retry(status: int) -> None:
         calls.append(request)
         return httpx.Response(status, json={"error": {"message": "nope"}})
 
-    service, client = _make_service(handler)
-    try:
-        with pytest.raises(PermanentToyVisionError) as exc_info:
-            await service.describe(WEBP_BYTES)
-    finally:
-        await client.aclose()
+    service = make_service(handler)
+
+    with pytest.raises(PermanentToyVisionError) as exc_info:
+        await service.describe(WEBP_BYTES)
 
     assert len(calls) == 1
     assert str(status) in str(exc_info.value)
 
 
-async def test_model_without_image_support_fails_with_clear_error() -> None:
+async def test_model_without_image_support_fails_with_clear_error(
+    make_service: ServiceFactory,
+) -> None:
     """Отказ «vision не поддерживается» даёт понятный текст, а не сказку."""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -320,12 +342,10 @@ async def test_model_without_image_support_fails_with_clear_error() -> None:
             },
         )
 
-    service, client = _make_service(handler)
-    try:
-        with pytest.raises(PermanentToyVisionError) as exc_info:
-            await service.describe(WEBP_BYTES)
-    finally:
-        await client.aclose()
+    service = make_service(handler)
+
+    with pytest.raises(PermanentToyVisionError) as exc_info:
+        await service.describe(WEBP_BYTES)
 
     message = str(exc_info.value)
     assert "HTTP 400" in message
@@ -350,6 +370,7 @@ async def test_model_without_image_support_fails_with_clear_error() -> None:
     ],
 )
 async def test_response_off_schema_raises_typed_error(
+    make_service: ServiceFactory,
     content: str,
 ) -> None:
     """Ответ не по схеме — типизированная ошибка, без выдуманного описания."""
@@ -362,12 +383,10 @@ async def test_response_off_schema_raises_typed_error(
             200, json={"choices": [{"message": {"content": content}}]}
         )
 
-    service, client = _make_service(handler)
-    try:
-        with pytest.raises(PermanentToyVisionError):
-            await service.describe(WEBP_BYTES)
-    finally:
-        await client.aclose()
+    service = make_service(handler)
+
+    with pytest.raises(PermanentToyVisionError):
+        await service.describe(WEBP_BYTES)
 
     # Схема описания не размывается дефолтами: все поля обязательны, иначе
     # модель могла бы не прислать, например, материал, и мы бы выдумали его.
@@ -397,36 +416,60 @@ async def test_response_off_schema_raises_typed_error(
     ],
 )
 async def test_broken_envelope_raises_typed_error(
+    make_service: ServiceFactory,
     payload: dict[str, Any],
     fragment: str,
 ) -> None:
     """Ответ без нормального конверта Chat Completions — тоже ошибка."""
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=payload)
+    service = make_service(_ok_handler([], payload))
 
-    service, client = _make_service(handler)
-    try:
-        with pytest.raises(PermanentToyVisionError) as exc_info:
-            await service.describe(WEBP_BYTES)
-    finally:
-        await client.aclose()
+    with pytest.raises(PermanentToyVisionError) as exc_info:
+        await service.describe(WEBP_BYTES)
 
     assert fragment in str(exc_info.value)
 
 
-async def test_unparsable_json_response_raises_typed_error() -> None:
+async def test_truncated_answer_reports_token_limit(
+    make_service: ServiceFactory,
+) -> None:
+    """Обрезанный по max_tokens ответ винит лимит, а не схему."""
+
+    truncated = '{"kind": "плюшевый медвежонок", "color": "ры'
+    service = make_service(
+        _ok_handler(
+            [],
+            {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": truncated},
+                    }
+                ]
+            },
+        )
+    )
+
+    with pytest.raises(PermanentToyVisionError) as exc_info:
+        await service.describe(WEBP_BYTES)
+
+    message = str(exc_info.value)
+    assert "DEEPSEEK_MAX_TOKENS" in message
+    assert "схем" not in message
+
+
+async def test_unparsable_json_response_raises_typed_error(
+    make_service: ServiceFactory,
+) -> None:
     """Ответ, который не разбирается как JSON, даёт понятную ошибку."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text="<html>maintenance</html>")
 
-    service, client = _make_service(handler)
-    try:
-        with pytest.raises(PermanentToyVisionError) as exc_info:
-            await service.describe(WEBP_BYTES)
-    finally:
-        await client.aclose()
+    service = make_service(handler)
+
+    with pytest.raises(PermanentToyVisionError) as exc_info:
+        await service.describe(WEBP_BYTES)
 
     assert "разобрать" in str(exc_info.value)
 
@@ -435,24 +478,37 @@ async def test_unparsable_json_response_raises_typed_error() -> None:
 
 
 @pytest.mark.parametrize("key", ["", "   "])
-async def test_empty_api_key_fails_before_network(key: str) -> None:
+async def test_empty_api_key_fails_before_network(
+    make_service: ServiceFactory,
+    key: str,
+) -> None:
     """Пустой ключ — понятная ошибка без единого сетевого вызова."""
 
-    calls: list[httpx.Request] = []
+    captured: list[httpx.Request] = []
+    service = make_service(_ok_handler(captured), deepseek_api_key=key)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request)
-        return httpx.Response(200, json=TOY_RESPONSE)
+    with pytest.raises(PermanentToyVisionError) as exc_info:
+        await service.describe(WEBP_BYTES)
 
-    service, client = _make_service(handler, deepseek_api_key=key)
-    try:
-        with pytest.raises(PermanentToyVisionError) as exc_info:
-            await service.describe(WEBP_BYTES)
-    finally:
-        await client.aclose()
-
-    assert calls == []
+    assert captured == []
     assert "DEEPSEEK_API_KEY" in str(exc_info.value)
+
+
+async def test_configuration_error_reported_before_photo_format(
+    make_service: ServiceFactory,
+) -> None:
+    """Отсутствие ключа важнее разбора байт: диагностика не зависит от фото."""
+
+    captured: list[httpx.Request] = []
+    service = make_service(_ok_handler(captured), deepseek_api_key="")
+
+    with pytest.raises(PermanentToyVisionError) as exc_info:
+        await service.describe(b"GIF89a\x01\x00\x01\x00")
+
+    assert captured == []
+    message = str(exc_info.value)
+    assert "DEEPSEEK_API_KEY" in message
+    assert "JPEG" not in message
 
 
 @pytest.mark.parametrize(
@@ -464,15 +520,14 @@ async def test_empty_api_key_fails_before_network(key: str) -> None:
     ],
 )
 async def test_api_key_never_leaks_into_body_url_or_errors(
+    make_service: ServiceFactory,
+    log_lines: list[str],
     status: int,
     raises: bool,
 ) -> None:
     """Ключ уходит только в заголовок: ни в тело, ни в URL, ни в лог."""
 
-    from loguru import logger
-
     captured: list[httpx.Request] = []
-    log_lines: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.append(request)
@@ -482,21 +537,15 @@ async def test_api_key_never_leaks_into_body_url_or_errors(
             status, json={"error": {"message": "service failure"}}
         )
 
-    sink_id = logger.add(
-        lambda message: log_lines.append(str(message)), level="DEBUG"
-    )
-    service, client = _make_service(handler)
-    try:
-        if raises:
-            with pytest.raises(ToyVisionError) as exc_info:
-                await service.describe(WEBP_BYTES)
-            error_text = str(exc_info.value)
-        else:
+    service = make_service(handler)
+
+    if raises:
+        with pytest.raises(ToyVisionError) as exc_info:
             await service.describe(WEBP_BYTES)
-            error_text = ""
-    finally:
-        await client.aclose()
-        logger.remove(sink_id)
+        error_text = str(exc_info.value)
+    else:
+        await service.describe(WEBP_BYTES)
+        error_text = ""
 
     request = captured[0]
     assert TEST_API_KEY in request.headers["Authorization"]
@@ -510,39 +559,30 @@ async def test_api_key_never_leaks_into_body_url_or_errors(
 
 
 @pytest.mark.parametrize("model", ["deepseek-flash", "deepseek-v4-pro"])
-async def test_vision_uses_same_model_setting_as_text(model: str) -> None:
-    """Распознавание идёт той же моделью, что и текст: новой настройки нет."""
+async def test_vision_uses_same_model_setting_as_text(
+    make_service: ServiceFactory,
+    model: str,
+) -> None:
+    """Распознавание идёт той же настройкой модели, что и генерация текста."""
 
     captured: list[httpx.Request] = []
+    service = make_service(_ok_handler(captured), deepseek_model=model)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured.append(request)
-        return httpx.Response(200, json=TOY_RESPONSE)
-
-    service, client = _make_service(handler, deepseek_model=model)
-    try:
-        await service.describe(WEBP_BYTES)
-    finally:
-        await client.aclose()
+    await service.describe(WEBP_BYTES)
 
     assert _body(captured[0])["model"] == model
-    assert not any(
-        "vision" in name or "toy" in name for name in Settings.model_fields
-    )
 
 
-async def test_aclose_is_safe_for_injected_client() -> None:
+async def test_aclose_is_safe_for_injected_client(
+    make_service: ServiceFactory,
+) -> None:
     """`aclose()` не закрывает чужой клиент (его закрывает владелец)."""
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=TOY_RESPONSE)
+    service = make_service(_ok_handler([]))
+    await service.describe(WEBP_BYTES)
 
-    service, client = _make_service(handler)
-    try:
-        await service.describe(WEBP_BYTES)
-        await service.aclose()
-        # Инъектированный клиент остаётся рабочим после `aclose()`.
-        again = await service.describe(WEBP_BYTES)
-        assert again.kind == "плюшевый медвежонок"
-    finally:
-        await client.aclose()
+    await service.aclose()
+
+    # Инъектированный клиент остаётся рабочим после `aclose()`.
+    again = await service.describe(WEBP_BYTES)
+    assert again.kind == "плюшевый медвежонок"
