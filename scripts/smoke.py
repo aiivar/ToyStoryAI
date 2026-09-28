@@ -4,13 +4,19 @@
 - загружает `Settings` из `.env`/окружения;
 - проверяет токен MAX через `get_me`;
 - проверяет ключ и модель DeepSeek коротким запросом;
-- сообщает режим видео (mock или реальный провайдер), не вызывая Kling.
+- сообщает режим иллюстраций (mock или реальный RouterAI) и число страниц
+  по умолчанию, ничего не вызывая.
+
+Скрипт по умолчанию **не тратит деньги**: платные вызовы — генерация
+иллюстраций RouterAI и распознавание игрушки — в нём не выполняются
+вообще. Живой запрос к DeepSeek (одно слово) остаётся: он нужен, чтобы
+отличить рабочий ключ от неверного, и стоит копейки.
 
 Запуск из корня проекта:
 
     python scripts/smoke.py
     python scripts/smoke.py --skip-max          # только DeepSeek
-    python scripts/smoke.py --skip-max --skip-deepseek   # только проверка конфигурации
+    python scripts/smoke.py --skip-max --skip-deepseek   # только конфигурация
 
 Код выхода 0 — все выполненные проверки прошли, 1 — была ошибка.
 """
@@ -35,15 +41,19 @@ from maxapi.exceptions import (  # noqa: E402
 from pydantic import ValidationError  # noqa: E402
 
 from app.config import Settings  # noqa: E402
-from app.services.video_provider import (  # noqa: E402
-    MockVideoProvider,
-    build_video_provider,
-)
 
 OK = "[OK]"
 FAIL = "[FAIL]"
 SKIP = "[SKIP]"
 INFO = "[INFO]"
+
+# Сообщение о том, что прогон по умолчанию бесплатный: платные вызовы
+# (иллюстрации, распознавание игрушки) скрипт не делает.
+NO_PAID_CALLS_NOTICE = (
+    "Платных вызовов нет: иллюстрации и распознавание игрушки скрипт "
+    "не проверяет, деньги тратит только пользовательская сказка."
+)
+
 
 
 async def check_max(settings: Settings) -> bool:
@@ -118,20 +128,24 @@ async def check_deepseek(settings: Settings) -> bool:
     return False
 
 
-def report_video_mode(settings: Settings) -> None:
-    """Сообщить, какой видеопровайдер выбран, без реального вызова."""
+def report_image_mode(settings: Settings) -> None:
+    """Сообщить режим иллюстраций, не делая платного вызова.
 
-    provider = build_video_provider(settings)
-    if isinstance(provider, MockVideoProvider):
+    Пустой `ROUTERAI_API_KEY` означает mock-картинки: на живой сказке
+    такой результат пользователю показывать нельзя, поэтому оба режима
+    печатаются явно.
+    """
+
+    if not settings.routerai_api_key:
         print(
-            f"{SKIP} Видео: KLING_API_KEY пуст → mock-провайдер, "
-            f"видео будет ссылкой {settings.mock_video_url}"
+            f"{SKIP} Иллюстрации: ROUTERAI_API_KEY не задан → mock-картинки; "
+            "живой вызов не выполняется"
         )
     else:
         print(
-            f"{INFO} Видео: KLING_API_KEY задан → реальный провайдер "
-            f"({settings.kling_model} @ {settings.kling_base_url}); "
-            "реальный вызов в этом режиме не выполняется"
+            f"{INFO} Иллюстрации: ROUTERAI_API_KEY задан → реальный "
+            f"провайдер ({settings.routerai_image_model} @ "
+            f"{settings.routerai_base_url}); живой вызов не выполняется"
         )
 
 
@@ -151,11 +165,23 @@ def load_settings() -> Settings | None:
         return None
 
 
-async def main() -> int:
-    parser = argparse.ArgumentParser(description="Smoke-проверка ToyStoryAI")
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Разобрать аргументы smoke-проверки.
+
+    Отдельная функция, чтобы разбор режимов проверялся тестом: сам скрипт
+    запускается руками, и ошибка в флагах осталась бы незамеченной.
+    """
+
+    parser = argparse.ArgumentParser(
+        description="Smoke-проверка ToyStoryAI (без платных вызовов)"
+    )
     parser.add_argument("--skip-max", action="store_true")
     parser.add_argument("--skip-deepseek", action="store_true")
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+async def main() -> int:
+    args = parse_args()
 
     settings = load_settings()
     if settings is None:
@@ -163,6 +189,7 @@ async def main() -> int:
 
     print(f"{INFO} Модель сказки: {settings.deepseek_model}")
     print(f"{INFO} База: {settings.database_url}")
+    print(f"{INFO} {NO_PAID_CALLS_NOTICE}")
 
     checks: list[bool] = []
 
@@ -176,7 +203,7 @@ async def main() -> int:
     else:
         checks.append(await check_deepseek(settings))
 
-    report_video_mode(settings)
+    report_image_mode(settings)
 
     if not checks:
         print(f"{INFO} Выполнены только проверки конфигурации.")
