@@ -681,7 +681,7 @@ async def test_logs_cover_every_stage_without_secrets(
             story_settings(
                 story_output_dir=str(tmp_path),
                 deepseek_api_key="SECRET-DEEPSEEK-KEY",
-                gemini_api_key="SECRET-GEMINI-KEY",
+                routerai_api_key="SECRET-ROUTERAI-KEY",
             ),
         )
         await pipeline.run(_state())
@@ -696,7 +696,7 @@ async def test_logs_cover_every_stage_without_secrets(
     assert "tokens=" in joined
     # Ключи провайдеров в лог не попадают.
     assert "SECRET-DEEPSEEK-KEY" not in joined
-    assert "SECRET-GEMINI-KEY" not in joined
+    assert "SECRET-ROUTERAI-KEY" not in joined
 
 
 def test_log_stage_formats_duration_and_tokens() -> None:
@@ -919,7 +919,7 @@ async def test_run_with_fakes_does_not_construct_network_clients(
         story_settings(
             story_output_dir=str(tmp_path),
             deepseek_api_key="SECRET-DEEPSEEK-KEY",
-            gemini_api_key="SECRET-GEMINI-KEY",
+            routerai_api_key="SECRET-ROUTERAI-KEY",
         ),
     )
     state = _state()

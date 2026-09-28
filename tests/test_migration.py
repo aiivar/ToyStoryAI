@@ -218,7 +218,13 @@ async def test_unopenable_database_does_not_break_startup() -> None:
 
 
 async def test_create_schema_runs_migration_itself() -> None:
-    """`create_schema` на старой базе сразу исправляет схему."""
+    """`create_schema` на старой базе сразу исправляет схему.
+
+    Проверяется включение, а не равенство: колонки прежнего видеофлоу
+    (`video_url`, `kling_request_id`) в старой базе остаются, а модель их
+    больше не маппит. `ALTER TABLE DROP COLUMN` не выполняется — колонки
+    безвредны и исчезают пересозданием базы.
+    """
 
     original, copy_path = copy_old_database("create-schema")
     db = Database(f"sqlite+aiosqlite:///{copy_path}")
@@ -232,4 +238,7 @@ async def test_create_schema_runs_migration_itself() -> None:
         copy_path.unlink(missing_ok=True)
 
     model_columns = {column.name for column in Generation.__table__.columns}
-    assert names == model_columns
+    assert model_columns <= names
+    assert set(NEW_COLUMNS) <= names
+    # Колонки удалённого видеофлоу остались на месте и не мешают.
+    assert {"video_url", "kling_request_id"} <= names

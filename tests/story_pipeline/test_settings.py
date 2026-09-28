@@ -19,10 +19,6 @@ _STORY_ENV_VARS = (
     "DEEPSEEK_MODEL",
     "DEEPSEEK_TIMEOUT",
     "DEEPSEEK_MAX_TOKENS",
-    "GEMINI_API_KEY",
-    "GEMINI_BASE_URL",
-    "GEMINI_MODEL",
-    "GEMINI_TIMEOUT",
     "ROUTERAI_API_KEY",
     "ROUTERAI_BASE_URL",
     "ROUTERAI_IMAGE_MODEL",
@@ -58,11 +54,6 @@ def test_defaults_without_max_bot_token(monkeypatch) -> None:
     assert config.deepseek_timeout == 60.0
     assert config.deepseek_max_tokens == 4096
 
-    assert config.gemini_api_key == ""
-    assert config.gemini_base_url == "https://generativelanguage.googleapis.com"
-    assert config.gemini_model == "gemini-3.1-flash-image"
-    assert config.gemini_timeout == 120.0
-
     assert config.routerai_api_key == ""
     assert config.routerai_base_url == "https://routerai.ru/api/v1"
     assert config.routerai_image_model == "google/gemini-3.1-flash-lite-image"
@@ -84,7 +75,6 @@ def test_environment_overrides_defaults(monkeypatch) -> None:
 
     _clear_story_env(monkeypatch)
     monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
-    monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash-image")
     monkeypatch.setenv("ROUTERAI_BASE_URL", "https://routerai.test/api/v1")
     monkeypatch.setenv("ROUTERAI_IMAGE_MODEL", "google/gemini-3.1-flash-image")
     monkeypatch.setenv("STORY_IMAGE_ASPECT_RATIO", "3:2")
@@ -95,7 +85,6 @@ def test_environment_overrides_defaults(monkeypatch) -> None:
     config = StorySettings(_env_file=None)  # type: ignore[call-arg]
 
     assert config.deepseek_model == "deepseek-v4-pro"
-    assert config.gemini_model == "gemini-2.5-flash-image"
     assert config.routerai_base_url == "https://routerai.test/api/v1"
     assert config.routerai_image_model == "google/gemini-3.1-flash-image"
     assert config.story_image_aspect_ratio == "3:2"
@@ -168,8 +157,8 @@ def test_settings_survive_example_env_file(monkeypatch, tmp_path) -> None:
         "MAX_BOT_TOKEN=\n"
         "DEEPSEEK_API_KEY=\n"
         "DEEPSEEK_MODEL=deepseek-flash\n"
-        "GEMINI_API_KEY=\n"
-        "GEMINI_MODEL=gemini-3.1-flash-image\n"
+        "ROUTERAI_API_KEY=\n"
+        "ROUTERAI_IMAGE_MODEL=google/gemini-3.1-flash-lite-image\n"
         "STORY_DEFAULT_PAGES=6\n"
         "STORY_OUTPUT_DIR=output\n",
         encoding="utf-8",
@@ -177,7 +166,27 @@ def test_settings_survive_example_env_file(monkeypatch, tmp_path) -> None:
 
     config = StorySettings(_env_file=str(env_file))  # type: ignore[call-arg]
 
-    assert config.gemini_api_key == ""
-    assert config.gemini_model == "gemini-3.1-flash-image"
+    assert config.routerai_api_key == ""
+    assert config.routerai_image_model == "google/gemini-3.1-flash-lite-image"
     assert config.story_default_pages == 6
     assert config.story_output_dir == "output"
+
+
+def test_gemini_variables_are_ignored(monkeypatch) -> None:
+    """Переменные Gemini больше не читаются и не ломают загрузку.
+
+    В локальных `.env` разработчиков они ещё остаются; если бы настройки
+    пайплайна продолжали их читать, удаление провайдера было бы незаметным
+    только до первого прогона.
+    """
+
+    _clear_story_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "sentinel-from-legacy-env")
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-legacy-model")
+
+    config = StorySettings(_env_file=None)  # type: ignore[call-arg]
+
+    assert not [
+        name for name in StorySettings.model_fields if name.startswith("gemini_")
+    ]
+    assert not hasattr(config, "gemini_api_key")

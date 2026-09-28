@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib
 from pathlib import Path
 
@@ -176,7 +177,10 @@ def test_sources_do_not_mention_removed_symbols() -> None:
     """В `app/` и `scripts/` не осталось упоминаний удалённых символов.
 
     Сканируются только файлы Python: `.env.example` и README проверяются
-    отдельно, а `.pyc` в `__pycache__` — сборка, а не код.
+    отдельно, а `.pyc` в `__pycache__` — сборка, а не код. Имена колонок
+    прежнего видеофлоу исключены из проверки намеренно: единственное их
+    упоминание — доктрина в `app/db/models.py`, объясняющая, почему эти
+    колонки остались в старых базах и почему их не дропают.
     """
 
     removed = (
@@ -185,7 +189,6 @@ def test_sources_do_not_mention_removed_symbols() -> None:
         "KlingProvider",
         "MockVideoProvider",
         "kling_api_key",
-        "kling_request_id",
         "TextGenerator",
         "encode_base64",
         "GeminiImageProvider",
@@ -193,15 +196,11 @@ def test_sources_do_not_mention_removed_symbols() -> None:
         "GenerationType.VIDEO",
         "create_video",
     )
+    sources = sorted((PROJECT_ROOT / "app").rglob("*.py")) + sorted(
+        (PROJECT_ROOT / "scripts").rglob("*.py")
+    )
     offenders: list[str] = []
-    for path in sorted((PROJECT_ROOT / "app").rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        offenders += [
-            f"{path.relative_to(PROJECT_ROOT)}: {token}"
-            for token in removed
-            if token in text
-        ]
-    for path in sorted((PROJECT_ROOT / "scripts").rglob("*.py")):
+    for path in sources:
         text = path.read_text(encoding="utf-8")
         offenders += [
             f"{path.relative_to(PROJECT_ROOT)}: {token}"
@@ -210,3 +209,33 @@ def test_sources_do_not_mention_removed_symbols() -> None:
         ]
 
     assert not offenders, offenders
+
+
+def test_legacy_video_column_names_survive_only_in_model_docstring() -> None:
+    """Имена legacy-колонок остались ровно в докстрине модели.
+
+    Без дропа колонок старые базы продолжают работать, и код должен объяснять
+    почему. Проверка закрывает путь, где кто-то «для порядка» начнёт писать
+    `video_url` или `kling_request_id` в коде, а не в объяснении.
+    """
+
+    expected = {
+        "app/db/models.py": ("video_url", "kling_request_id"),
+    }
+    for path in sorted((PROJECT_ROOT / "app").rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        mentioned = {
+            name
+            for name in ("video_url", "kling_request_id")
+            if name in text
+        }
+        relative = str(path.relative_to(PROJECT_ROOT))
+        if not mentioned:
+            continue
+        assert relative in expected, f"{relative}: {sorted(mentioned)}"
+        # Упоминание допустимо только в докстрине модуля, не в коде.
+        module_docstring = ast.get_docstring(
+            ast.parse(text), clean=False
+        ) or ""
+        for name in mentioned:
+            assert name in module_docstring, f"{relative}: {name} вне докстрины"

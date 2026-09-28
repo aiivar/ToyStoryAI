@@ -1,8 +1,7 @@
-"""Тесты приёма фото: валидация, сохранение и base64."""
+"""Тесты приёма фото: валидация, сохранение и чтение для фоновой генерации."""
 
 from __future__ import annotations
 
-import base64
 from pathlib import Path
 from uuid import uuid4
 
@@ -175,32 +174,35 @@ async def test_save_accepts_extension_without_dot() -> None:
     uploads.rmdir()
 
 
-# --- Задача 3.3: base64 для видеопровайдера ----------------------------------
+async def test_read_missing_file_raises_clear_error() -> None:
+    """Ошибка чтения поднимает понятную ошибку, а не пустой результат.
 
-
-async def test_encodes_saved_photo_to_base64() -> None:
-    """Тест проверяет корректную base64-строку из файла."""
-
-    uploads = TMP_ROOT / f"uploads-{uuid4().hex}"
-    storage = PhotoStorage(uploads)
-    data = make_photo_bytes(400, 400)
-    path = storage.save(data, extension=".png", user_id=1)
-
-    encoded = storage.encode_base64(path)
-
-    assert base64.b64decode(encoded) == data
-
-    path.unlink()
-    uploads.rmdir()
-
-
-async def test_encode_missing_file_raises_clear_error() -> None:
-    """Ошибка чтения поднимает понятную ошибку, а не пустой результат."""
+    Раньше этот путь проверялся через `encode_base64`: после удаления
+    видеопровайдера base64-кодирование не нужно, но фоновая генерация читает
+    фото через `read_bytes`, и ошибка чтения обязана остаться понятной.
+    """
 
     storage = PhotoStorage(TMP_ROOT / "missing")
 
     with pytest.raises(PhotoStorageError) as exc:
-        storage.encode_base64(TMP_ROOT / "does-not-exist.png")
+        storage.read_bytes(TMP_ROOT / "does-not-exist.png")
 
     assert exc.value.reason == "read"
     assert exc.value.user_message
+
+
+async def test_read_empty_file_raises_clear_error() -> None:
+    """Пустой сохранённый файл — тоже ошибка, а не пустые байты прогона."""
+
+    uploads = TMP_ROOT / f"uploads-{uuid4().hex}"
+    storage = PhotoStorage(uploads)
+    path = storage.save(b"", extension=".png", user_id=1)
+
+    with pytest.raises(PhotoStorageError) as exc:
+        storage.read_bytes(path)
+
+    assert exc.value.reason == "empty"
+    assert exc.value.user_message
+
+    path.unlink()
+    uploads.rmdir()

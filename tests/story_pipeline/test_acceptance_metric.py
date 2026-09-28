@@ -188,7 +188,7 @@ def _live_run_state(
             "story_output_dir": str(output_root),
             # Метрике нужны только вердикты судьи: изображения мокаются,
             # чтобы серия не тратила деньги на генерацию картинок.
-            "gemini_api_key": "",
+            "routerai_api_key": "",
         }
     )
     stamp = (base + timedelta(seconds=index)).strftime("%Y%m%d-%H%M%S")

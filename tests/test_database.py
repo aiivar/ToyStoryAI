@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -17,6 +18,76 @@ TMP_ROOT = Path(".tmp/tests")
 # Текст сказки прежнего формата: 150–300 слов одним абзацем, тип `tale`.
 # Именно такие записи лежат в боевой `bot.db` и должны засчитываться в квоту.
 OLD_TALE_TEXT = " ".join(["Жил-был зайчик."] * 120)
+
+
+# Колонки прежнего видеофлоу: в боевой `bot.db` они остались, и модель их
+# больше не маппит. `create_all` в новой базе их не создаёт, поэтому тест
+# добавляет их тем же `ALTER TABLE`, каким база расходилась с моделью.
+LEGACY_VIDEO_COLUMNS = {
+    "video_url": "VARCHAR(2048)",
+    "kling_request_id": "VARCHAR(255)",
+}
+
+
+async def insert_legacy_video_row(
+    database: Database,
+    user_id: int,
+    *,
+    status: str = "success",
+) -> int:
+    """Вставить запись прежнего видеофлоу мимо ORM и вернуть её id.
+
+    Видеофлоу удалён, поэтому `Generation` больше не знает ни типа `video`,
+    ни колонок `video_url`/`kling_request_id`. Такие строки остаются в уже
+    созданных базах (дропать колонки и строки нельзя), и квота обязана
+    продолжать работать в их присутствии. Пишем их сырым SQL — ровно так,
+    как они лежат в боевой `bot.db`.
+    """
+
+    async with database.engine.begin() as connection:
+        existing = await connection.run_sync(_legacy_columns)
+        for name, ddl_type in LEGACY_VIDEO_COLUMNS.items():
+            if name not in existing:
+                await connection.execute(
+                    sa.text(
+                        f'ALTER TABLE "generations" ADD COLUMN "{name}" {ddl_type}'
+                    )
+                )
+
+    async with database.session_scope() as session:
+        await session.execute(
+            sa.text(
+                "INSERT INTO generations "
+                "(user_id, created_at, type, status, tale_text, video_url, "
+                "local_path, kling_request_id, error) "
+                "VALUES (:user_id, :created_at, 'video', :status, NULL, "
+                "'https://cdn.example.com/v.mp4', NULL, 'legacy-req', NULL)"
+            ),
+            {
+                "user_id": user_id,
+                "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                "status": status,
+            },
+        )
+        await session.commit()
+        result = await session.execute(
+            sa.text(
+                "SELECT id FROM generations "
+                "WHERE user_id = :user_id AND type = 'video' "
+                "ORDER BY id DESC LIMIT 1"
+            ),
+            {"user_id": user_id},
+        )
+        return int(result.scalar_one())
+
+
+def _legacy_columns(sync_connection: object) -> set[str]:
+    """Имена колонок `generations` через инспектор SQLAlchemy."""
+
+    inspector = sa.inspect(sync_connection)
+    return {
+        column["name"] for column in inspector.get_columns("generations")
+    }
 
 
 # --- Задачи 2.1 и 2.2: модель и создание схемы ------------------------------
@@ -76,47 +147,22 @@ async def test_create_tale_record(
     assert record.created_at is not None
 
 
-async def test_create_video_record_with_request_id(
-    repository: GenerationRepository,
-) -> None:
-    """Запись о видео сохраняет идентификатор запроса провайдера."""
-
-    record = await repository.create_video(
-        101,
-        request_id="req-abc",
-        local_path="uploads/a.jpg",
-    )
-
-    assert record.type is GenerationType.VIDEO
-    assert record.status is GenerationStatus.IN_PROGRESS
-    assert record.kling_request_id == "req-abc"
-
-
 async def test_update_status_and_result(
     repository: GenerationRepository,
 ) -> None:
     """Обновление переводит запись в терминальное состояние с результатом."""
 
     tale = await repository.create_tale(101)
-    video = await repository.create_video(101, request_id="req-1")
 
     updated_tale = await repository.update_result(
         tale.id,
         status=GenerationStatus.SUCCESS,
         tale_text="Жила-была игрушка...",
     )
-    updated_video = await repository.update_result(
-        video.id,
-        status=GenerationStatus.SUCCESS,
-        video_url="https://cdn.example.com/v.mp4",
-    )
 
     assert updated_tale is not None
     assert updated_tale.status is GenerationStatus.SUCCESS
     assert updated_tale.tale_text == "Жила-была игрушка..."
-    assert updated_video is not None
-    assert updated_video.status is GenerationStatus.SUCCESS
-    assert updated_video.video_url == "https://cdn.example.com/v.mp4"
 
 
 async def test_update_unknown_record_returns_none(
@@ -138,11 +184,30 @@ async def test_history_is_sorted_newest_first(
     """История пользователя упорядочена от новых записей к старым."""
 
     first = await repository.create_tale(202)
-    second = await repository.create_video(202, request_id="req-2")
+    second = await repository.create_tale(202)
 
     history = await repository.get_history(202)
 
     assert [item.id for item in history] == [second.id, first.id]
+
+
+async def test_history_skips_legacy_video_rows(
+    database: Database,
+    repository: GenerationRepository,
+) -> None:
+    """История сказок не падает и не тащит записи прежнего видеофлоу.
+
+    В боевой `bot.db` остались строки `type = 'video'`, а `GenerationType`
+    их больше не знает: без отбора в SQL такая строка уронила бы загрузку
+    с `LookupError` прямо в чтении истории.
+    """
+
+    await insert_legacy_video_row(database, 250)
+    tale = await repository.create_tale(250)
+
+    history = await repository.get_history(250)
+
+    assert [item.id for item in history] == [tale.id]
 
 
 async def test_history_is_isolated_per_user(
@@ -178,6 +243,7 @@ async def test_completed_tale_counts_as_used_story(
 
 
 async def test_old_format_tale_with_video_counts_as_used_story(
+    database: Database,
     repository: GenerationRepository,
 ) -> None:
     """Старая успешная сказка прежнего формата тоже засчитывается (D19).
@@ -188,12 +254,9 @@ async def test_old_format_tale_with_video_counts_as_used_story(
     """
 
     tale = await repository.create_tale(909)
-    video = await repository.create_video(909, request_id="old")
+    await insert_legacy_video_row(database, 909)
     await repository.update_result(
         tale.id, status=GenerationStatus.SUCCESS, tale_text=OLD_TALE_TEXT
-    )
-    await repository.update_result(
-        video.id, status=GenerationStatus.SUCCESS, video_url="https://cdn/v.mp4"
     )
 
     assert await repository.has_completed_story(909) is True
@@ -256,43 +319,42 @@ async def test_story_of_another_user_does_not_count(
 
 
 async def test_quota_not_used_with_only_failures(
+    database: Database,
     repository: GenerationRepository,
 ) -> None:
     """Неудачные генерации не расходуют бесплатную квоту."""
 
     tale = await repository.create_tale(808)
-    video = await repository.create_video(808, request_id="req-4")
+    await insert_legacy_video_row(database, 808, status="failed")
     await repository.update_result(
         tale.id,
         status=GenerationStatus.FAILED,
         error="deepseek down",
-    )
-    await repository.update_result(
-        video.id,
-        status=GenerationStatus.FAILED,
-        error="kling timeout",
     )
 
     assert await repository.has_completed_story(808) is False
 
 
 async def test_video_success_alone_does_not_consume_story(
+    database: Database,
     repository: GenerationRepository,
 ) -> None:
-    """Одного успешного видеопрогона для квоты недостаточно."""
+    """Одного успешного видеопрогона прежнего флоу для квоты недостаточно.
 
-    video = await repository.create_video(818, request_id="req-5")
-    await repository.update_result(
-        video.id, status=GenerationStatus.SUCCESS, video_url="https://cdn/v.mp4"
-    )
+    Квота — это «одна завершённая сказка», поэтому запись удалённой функции
+    не должна её занимать, даже если в базе она осталась как `success`.
+    """
+
+    await insert_legacy_video_row(database, 818)
 
     assert await repository.has_completed_story(818) is False
 
 
 def test_dead_quota_method_is_gone() -> None:
-    """Мёртвый предикат про «сказка + видео» удалён из репозитория."""
+    """Мёртвые методы репозитория удалены вместе с видеофлоу."""
 
     assert not hasattr(GenerationRepository, "has_completed_full_generation")
+    assert not hasattr(GenerationRepository, "create_video")
     assert hasattr(GenerationRepository, "has_completed_story")
 
 
