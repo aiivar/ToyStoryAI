@@ -54,6 +54,32 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- RouterAI (генерация иллюстраций) ------------------------------
+    routerai_api_key: str = Field(
+        default="",
+        description=(
+            "API-ключ RouterAI. Пустое значение включает MockImageProvider "
+            "(картинки 32×32) и исключает платные вызовы."
+        ),
+    )
+    routerai_base_url: str = Field(
+        default="https://routerai.ru/api/v1",
+        description="Базовый URL OpenAI-совместимого API RouterAI.",
+    )
+    routerai_image_model: str = Field(
+        default="google/gemini-3.1-flash-lite-image",
+        description="Модель генерации изображений в RouterAI.",
+    )
+    routerai_timeout: float = Field(
+        default=120.0,
+        gt=0,
+        description=(
+            "Таймаут HTTP-запроса к RouterAI в секундах. Живой вызов одной "
+            "картинки занимает около 5 с, запас нужен на медленный ответ и "
+            "повтор после временного сбоя."
+        ),
+    )
+
     # --- Видеопровайдер (Kling AI / GMI Cloud) -------------------------
     kling_api_key: str = Field(
         default="",

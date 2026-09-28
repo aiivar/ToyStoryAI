@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from app.story_pipeline.settings import StorySettings, get_story_settings
+import pytest
+from pydantic import ValidationError
+
+from app.story_pipeline.settings import (
+    SUPPORTED_ASPECT_RATIOS,
+    StorySettings,
+    get_story_settings,
+)
 
 # Переменные, которые читает StorySettings; в тестах изолируем окружение,
 # чтобы значения из внешней среды не влияли на проверки по умолчанию.
@@ -16,6 +23,11 @@ _STORY_ENV_VARS = (
     "GEMINI_BASE_URL",
     "GEMINI_MODEL",
     "GEMINI_TIMEOUT",
+    "ROUTERAI_API_KEY",
+    "ROUTERAI_BASE_URL",
+    "ROUTERAI_IMAGE_MODEL",
+    "ROUTERAI_TIMEOUT",
+    "STORY_IMAGE_ASPECT_RATIO",
     "STORY_DEFAULT_PAGES",
     "STORY_PAGES_MIN",
     "STORY_PAGES_MAX",
@@ -51,6 +63,13 @@ def test_defaults_without_max_bot_token(monkeypatch) -> None:
     assert config.gemini_model == "gemini-3.1-flash-image"
     assert config.gemini_timeout == 120.0
 
+    assert config.routerai_api_key == ""
+    assert config.routerai_base_url == "https://routerai.ru/api/v1"
+    assert config.routerai_image_model == "google/gemini-3.1-flash-lite-image"
+    assert config.routerai_timeout == 120.0
+
+    assert config.story_image_aspect_ratio == "4:3"
+
     assert config.story_default_pages == 6
     assert config.story_pages_min == 1
     assert config.story_pages_max == 12
@@ -66,6 +85,9 @@ def test_environment_overrides_defaults(monkeypatch) -> None:
     _clear_story_env(monkeypatch)
     monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("GEMINI_MODEL", "gemini-2.5-flash-image")
+    monkeypatch.setenv("ROUTERAI_BASE_URL", "https://routerai.test/api/v1")
+    monkeypatch.setenv("ROUTERAI_IMAGE_MODEL", "google/gemini-3.1-flash-image")
+    monkeypatch.setenv("STORY_IMAGE_ASPECT_RATIO", "3:2")
     monkeypatch.setenv("STORY_DEFAULT_PAGES", "8")
     monkeypatch.setenv("STORY_AGE_MAX", "8")
     monkeypatch.setenv("STORY_OUTPUT_DIR", "runs")
@@ -74,6 +96,9 @@ def test_environment_overrides_defaults(monkeypatch) -> None:
 
     assert config.deepseek_model == "deepseek-v4-pro"
     assert config.gemini_model == "gemini-2.5-flash-image"
+    assert config.routerai_base_url == "https://routerai.test/api/v1"
+    assert config.routerai_image_model == "google/gemini-3.1-flash-image"
+    assert config.story_image_aspect_ratio == "3:2"
     assert config.story_default_pages == 8
     assert config.story_age_max == 8
     assert config.story_output_dir == "runs"
@@ -93,6 +118,41 @@ def test_get_story_settings_returns_instance(monkeypatch, tmp_path) -> None:
     # Поле бота MAX не входит в настройки пайплайна.
     assert not hasattr(config, "max_bot_token")
     assert config.story_default_pages == 6
+
+
+def test_unsupported_aspect_ratio_is_rejected() -> None:
+    """Опечатка в STORY_IMAGE_ASPECT_RATIO отклоняется с понятным текстом."""
+
+    with pytest.raises(ValidationError) as failure:
+        StorySettings(  # type: ignore[call-arg]
+            _env_file=None, story_image_aspect_ratio="4:31"
+        )
+
+    message = str(failure.value)
+    # В сообщении есть и ошибочное значение, и список допустимых.
+    assert "4:31" in message
+    assert "16:9" in message
+
+
+@pytest.mark.parametrize("aspect_ratio", SUPPORTED_ASPECT_RATIOS)
+def test_supported_aspect_ratio_is_accepted(aspect_ratio: str) -> None:
+    """Каждое поддерживаемое соотношение сторон проходит валидацию."""
+
+    config = StorySettings(  # type: ignore[call-arg]
+        _env_file=None, story_image_aspect_ratio=aspect_ratio
+    )
+
+    assert config.story_image_aspect_ratio == aspect_ratio
+
+
+def test_empty_aspect_ratio_means_provider_default() -> None:
+    """Пустое соотношение допустимо: провайдеру не отправляется ничего."""
+
+    config = StorySettings(  # type: ignore[call-arg]
+        _env_file=None, story_image_aspect_ratio="  "
+    )
+
+    assert config.story_image_aspect_ratio == ""
 
 
 def test_settings_survive_example_env_file(monkeypatch, tmp_path) -> None:

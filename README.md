@@ -233,6 +233,11 @@ cp .env.example .env
 | `GEMINI_BASE_URL` | Базовый URL Gemini API | `https://generativelanguage.googleapis.com` |
 | `GEMINI_MODEL` | Модель генерации изображений | `gemini-3.1-flash-image` |
 | `GEMINI_TIMEOUT` | Таймаут HTTP-запроса к Gemini, с | `120` |
+| `ROUTERAI_API_KEY` | Ключ RouterAI для иллюстраций; пусто = mock | пусто |
+| `ROUTERAI_BASE_URL` | Базовый URL API RouterAI | `https://routerai.ru/api/v1` |
+| `ROUTERAI_IMAGE_MODEL` | Модель генерации изображений в RouterAI | `google/gemini-3.1-flash-lite-image` |
+| `ROUTERAI_TIMEOUT` | Таймаут HTTP-запроса к RouterAI, с | `120` |
+| `STORY_IMAGE_ASPECT_RATIO` | Соотношение сторон страниц-иллюстраций | `4:3` |
 | `STORY_DEFAULT_PAGES` | Число страниц сказки по умолчанию | `6` |
 | `STORY_PAGES_MIN` | Минимальное число страниц | `1` |
 | `STORY_PAGES_MAX` | Максимальное число страниц | `12` |
