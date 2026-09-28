@@ -93,7 +93,9 @@ def test_configuration_only_run_reports_being_free(
     monkeypatch.setenv("MAX_BOT_TOKEN", "test-token")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "")
     monkeypatch.setenv("ROUTERAI_API_KEY", "")
-    monkeypatch.setattr("sys.argv", ["smoke.py", "--skip-max", "--skip-deepseek"])
+    monkeypatch.setattr(
+        "sys.argv", ["smoke.py", "--skip-max", "--skip-deepseek"]
+    )
 
     assert asyncio.run(smoke.main()) == 0
 

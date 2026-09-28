@@ -93,6 +93,15 @@ def column_names(db_path: Path) -> set[str]:
     return {str(row[1]) for row in rows}
 
 
+def _columns_of(sync_connection: object) -> set[str]:
+    """Имена колонок `generations` через инспектор SQLAlchemy."""
+
+    inspector = sa.inspect(sync_connection)
+    return {
+        column["name"] for column in inspector.get_columns("generations")
+    }
+
+
 async def test_migration_adds_new_columns_to_old_database() -> None:
     """На копии старой базы миграция добавляет `pages_count` и `output_dir`."""
 
@@ -175,7 +184,7 @@ async def test_migration_does_nothing_on_new_database() -> None:
 
 
 async def test_failed_alter_does_not_break_startup() -> None:
-    """Неудачный `ALTER TABLE` не поднимается наружу: старт бота не ломается."""
+    """Неудачный `ALTER TABLE` не поднимается наружу: старт не ломается."""
 
     original, copy_path = copy_old_database("guarded")
     copy_path.chmod(0o444)
@@ -209,7 +218,7 @@ async def test_unopenable_database_does_not_break_startup() -> None:
 
 
 async def test_create_schema_runs_migration_itself() -> None:
-    """`create_schema` на старой базе сходу исправляет схему и читает строки."""
+    """`create_schema` на старой базе сразу исправляет схему."""
 
     original, copy_path = copy_old_database("create-schema")
     db = Database(f"sqlite+aiosqlite:///{copy_path}")
@@ -224,12 +233,3 @@ async def test_create_schema_runs_migration_itself() -> None:
 
     model_columns = {column.name for column in Generation.__table__.columns}
     assert names == model_columns
-
-
-def _columns_of(sync_connection: object) -> set[str]:
-    """Имена колонок `generations` через инспектор SQLAlchemy."""
-
-    inspector = sa.inspect(sync_connection)
-    return {
-        column["name"] for column in inspector.get_columns("generations")
-    }

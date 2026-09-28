@@ -619,7 +619,6 @@ async def test_successful_run_records_pages_count_and_output_dir(
     update = bundle.repository.updates[-1]
     assert update["generation_id"] == 8
     assert update["pages_count"] == 3
-    assert update["output_dir"] == update["output_dir"].strip()
     assert update["output_dir"].startswith("output/1-")
     # Каталог прогона — диагностика, ссылку на него в чат не отдаём.
     texts = [text for text in bundle.bot.sent_texts if text]
@@ -677,7 +676,9 @@ async def test_crashed_run_still_records_run_dir(tmp_path: Path) -> None:
 
     update = bundle.repository.updates[-1]
     assert update["status"] is GenerationStatus.FAILED
-    assert update["output_dir"] == bundle.pipeline.calls[0].settings.story_output_dir
+    assert update["output_dir"] == (
+        bundle.pipeline.calls[0].settings.story_output_dir
+    )
 
 
 # --- 5.6: отказы --------------------------------------------------------------

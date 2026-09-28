@@ -360,8 +360,8 @@ class StoryRunner:
         pipeline: StoryPipeline | None = None
         # Каталог прогона известен сразу после сборки настроек: он нужен и
         # записи о прогоне, и разбору сбоя, поэтому живёт вне `try`.
-        # Пустая строка означает «сборка настроек не прошла» — тогда запись
-        # закрывается без каталога, но не падает.
+        # Пустая строка означает «сборка настроек не прошла» — тогда в запись
+        # каталог не пишется вовсе, но прогон закрывается как обычно.
         run_dir: str = ""
         try:
             run_settings = self._settings.model_copy(
@@ -399,7 +399,7 @@ class StoryRunner:
                 request,
                 status=GenerationStatus.FAILED,
                 error=str(exc),
-                output_dir=run_dir,
+                output_dir=run_dir or None,
             )
             await send(GENERATION_FAILED, [build_restart_keyboard().as_markup()])
             return
