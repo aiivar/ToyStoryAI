@@ -18,10 +18,7 @@ _ROUTERAI_ENV_VARS = (
     "STORY_IMAGE_ASPECT_RATIO",
 )
 
-_VIDEO_AND_GEMINI_ENV_VARS = (
-    "KLING_API_KEY",
-    "KLING_BASE_URL",
-    "KLING_MODEL",
+_GEMINI_ENV_VARS = (
     "GEMINI_API_KEY",
     "GEMINI_BASE_URL",
     "GEMINI_MODEL",
@@ -38,13 +35,34 @@ def test_loads_default_values_with_required_token(monkeypatch) -> None:
     assert config.max_bot_token == "token-123"
     assert config.deepseek_base_url == "https://api.deepseek.com"
     assert config.deepseek_model == "deepseek-flash"
-    assert config.kling_model == "kling-v3-image-to-video"
-    assert config.kling_poll_interval == 10.0
-    assert config.kling_max_wait == 600.0
     assert config.database_url == "sqlite+aiosqlite:///./bot.db"
     assert config.log_level == "INFO"
-    # Kling-ключ может быть пустым — это включает mock-провайдер.
-    assert config.kling_api_key == ""
+
+
+def test_no_kling_variable_is_required(monkeypatch) -> None:
+    """Загрузка настроек не зависит ни от одной Kling-переменной.
+
+    Переменные прежнего флоу остались бы в `.env` разработчика; если бы
+   Settings их требовала, бот не поднялся бы с типичным локальным окружением.
+    Ставятся заведомо неверные значения: подставленная настройка проявилась бы
+    как поле с этим значением.
+    """
+
+    for name in (
+        "KLING_API_KEY",
+        "KLING_BASE_URL",
+        "KLING_MODEL",
+        "KLING_POLL_INTERVAL",
+        "KLING_MAX_WAIT",
+        "MOCK_VIDEO_URL",
+    ):
+        monkeypatch.setenv(name, "sentinel-from-legacy-env")
+
+    config = Settings(_env_file=None, max_bot_token="token-123")  # type: ignore[call-arg]
+
+    assert not [name for name in Settings.model_fields if "kling" in name]
+    assert "mock_video_url" not in Settings.model_fields
+    assert not hasattr(config, "kling_api_key")
 
 
 def test_fails_without_required_token(monkeypatch) -> None:
@@ -61,13 +79,13 @@ def test_environment_overrides_defaults(monkeypatch) -> None:
 
     monkeypatch.setenv("MAX_BOT_TOKEN", "env-token")
     monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
-    monkeypatch.setenv("KLING_POLL_INTERVAL", "3")
+    monkeypatch.setenv("DEEPSEEK_MAX_TOKENS", "8192")
 
     config = Settings(_env_file=None)  # type: ignore[call-arg]
 
     assert config.max_bot_token == "env-token"
     assert config.deepseek_model == "deepseek-v4-pro"
-    assert config.kling_poll_interval == 3.0
+    assert config.deepseek_max_tokens == 8192
 
 
 def _bot_settings() -> Settings:
@@ -116,16 +134,16 @@ def test_routerai_image_environment_overrides_defaults(monkeypatch) -> None:
     assert not hasattr(config, "story_image_aspect_ratio")
 
 
-def test_both_settings_classes_load_without_kling_and_gemini_keys(
+def test_both_settings_classes_load_without_api_keys(
     monkeypatch,
 ) -> None:
-    """Оба класса настроек грузятся без ключей Kling и Gemini.
+    """Оба класса настроек грузятся без единого ключа внешнего API.
 
-    Ключи Kling и Gemini не обязательны: их отсутствие включает mock-провайдеры
-    и не должно ронять загрузку конфигурации.
+    Ключи не обязательны: их отсутствие включает mock-провайдеры и не должно
+    ронять загрузку конфигурации.
     """
 
-    for name in _VIDEO_AND_GEMINI_ENV_VARS:
+    for name in _GEMINI_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
     for name in _ROUTERAI_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
@@ -134,7 +152,7 @@ def test_both_settings_classes_load_without_kling_and_gemini_keys(
     bot_settings = Settings(_env_file=None)  # type: ignore[call-arg]
     story_settings = StorySettings(_env_file=None)  # type: ignore[call-arg]
 
-    assert bot_settings.kling_api_key == ""
-    assert story_settings.gemini_api_key == ""
+    assert bot_settings.routerai_api_key == ""
+    assert bot_settings.deepseek_api_key == ""
     assert story_settings.routerai_api_key == ""
     assert story_settings.story_image_aspect_ratio == "4:3"

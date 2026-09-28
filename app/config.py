@@ -80,66 +80,6 @@ class Settings(BaseSettings):
         ),
     )
 
-    # --- Видеопровайдер (Kling AI / GMI Cloud) -------------------------
-    kling_api_key: str = Field(
-        default="",
-        description=(
-            "API-ключ видеопровайдера. Пустое значение включает "
-            "MockVideoProvider."
-        ),
-    )
-    kling_base_url: str = Field(
-        default="https://api.gmi-serving.com/v1",
-        description="Базовый URL совместимого с Kling видеопровайдера.",
-    )
-    kling_model: str = Field(
-        default="kling-v3-image-to-video",
-        description="Модель image-to-video видеопровайдера.",
-    )
-    kling_create_path: str = Field(
-        default="/videos/image2video",
-        description="Путь создания запроса генерации видео.",
-    )
-    kling_status_path: str = Field(
-        default="/videos/image2video/{request_id}",
-        description="Путь опроса статуса запроса; содержит {request_id}.",
-    )
-    kling_poll_interval: float = Field(
-        default=10.0,
-        ge=0,
-        description="Интервал опроса статуса видео в секундах.",
-    )
-    kling_max_wait: float = Field(
-        default=600.0,
-        gt=0,
-        description="Максимальное ожидание генерации видео в секундах.",
-    )
-    kling_duration: str = Field(
-        default="5",
-        description="Длительность видео в секундах (параметр запроса).",
-    )
-    kling_mode: str = Field(
-        default="std",
-        description="Режим качества видеопровайдера (standard).",
-    )
-    kling_resolution: str = Field(
-        default="720p",
-        description="Разрешение видео.",
-    )
-    kling_sound: bool = Field(
-        default=False,
-        description="Генерация звука; в MVP выключена.",
-    )
-    kling_timeout: float = Field(
-        default=120.0,
-        gt=0,
-        description="Таймаут HTTP-запроса к видеопровайдеру в секундах.",
-    )
-    mock_video_url: str = Field(
-        default="https://example.com/mock/toy-story-preview.mp4",
-        description="Ссылка на тестовое видео, выдаваемая заглушкой.",
-    )
-
     # --- Хранение ------------------------------------------------------
     database_url: str = Field(
         default="sqlite+aiosqlite:///./bot.db",

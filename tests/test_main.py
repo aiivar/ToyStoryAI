@@ -163,7 +163,6 @@ def test_module_entrypoint_starts_and_stops() -> None:
             "MAX_BOT_TOKEN": "definitely-invalid-token",
             "DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
             "UPLOADS_DIR": str(TMP_ROOT / "entrypoint-uploads"),
-            "KLING_API_KEY": "",
             "LOG_LEVEL": "INFO",
         }
     )
