@@ -1,44 +1,81 @@
-"""Клавиатуры и наборы вариантов сценария сказки."""
+"""Клавиатуры диалога: возраст, мораль и служебные кнопки.
+
+Списки вариантов заданы требованиями, а не придуманы интерфейсом: возраст
+3–6 лет совпадает с допустимым диапазоном пайплайна (`story_age_min`/
+`story_age_max`), а мораль — курируемый список из шести формулировок,
+безопасных для детей и подходящих на роль морали сказки. Свободного ввода
+нет: значение приходит только с кнопки, поэтому произвольный текст на входе
+LLM невозможен, а поддельный payload разбирается в `None` и отбрасывается
+вызывающим кодом.
+"""
 
 from __future__ import annotations
 
 from maxapi.types.attachments.buttons.callback_button import CallbackButton
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
-# Наборы вариантов, заданные требованиями.
-STYLE_OPTIONS: tuple[str, ...] = (
-    "Волшебная",
-    "Смешная",
-    "Приключенческая",
+# Возраст читателя: значения совпадают с диапазоном пайплайна по умолчанию.
+AGE_OPTIONS: tuple[int, ...] = (3, 4, 5, 6)
+
+# Курируемый список моралей. Формулировки родительские, поэтому в сказку
+# уходят дословно: переписывать их «под глагол» нельзя, список и есть
+# продуктовое требование.
+MORAL_OPTIONS: tuple[str, ...] = (
+    "делиться с другими",
+    "не сдаваться, а пробовать снова",
+    "помогать тем, кому трудно",
+    "вежливо просить и благодарить",
+    "не бояться нового",
+    "убирать за собой",
 )
-ACTION_OPTIONS: tuple[str, ...] = (
-    "Танец",
-    "Полёт",
-    "Путешествие",
-)
+
+# Подписи кнопок возраста: падеж после числительного, а не «3 года/лет».
+_AGE_LABELS: dict[int, str] = {
+    3: "3 года",
+    4: "4 года",
+    5: "5 лет",
+    6: "6 лет",
+}
 
 # Payload'ы callback-кнопок.
 UPLOAD_PHOTO_PAYLOAD = "upload_photo"
 SUBSCRIBE_PAYLOAD = "subscribe"
 RESTART_PAYLOAD = "restart"
-STYLE_PREFIX = "style:"
-ACTION_PREFIX = "action:"
+AGE_PREFIX = "age:"
+MORAL_PREFIX = "moral:"
+
+
+def age_label(age: int) -> str:
+    """Подпись кнопки возраста; неизвестный возраст показывается числом."""
+
+    return _AGE_LABELS.get(age, str(age))
 
 
 def _option_payload(prefix: str, index: int) -> str:
     return f"{prefix}{index}"
 
 
-def parse_style_payload(payload: str | None) -> str | None:
-    """Вернуть стиль по payload'у кнопки или None."""
+def parse_age_payload(payload: str | None) -> int | None:
+    """Вернуть возраст по payload'у кнопки или None.
 
-    return _parse_option(payload, STYLE_PREFIX, STYLE_OPTIONS)
+    `None` означает «значения в клавиатуре нет»: и неверный формат, и число
+    вне списка 3–6. Проверка по списку, а не по диапазону, закрывает
+    поддельные payload вида `age:9` и `age:-1`.
+    """
+
+    if not payload or not payload.startswith(AGE_PREFIX):
+        return None
+    raw_value = payload[len(AGE_PREFIX) :]
+    if not raw_value.isdigit():
+        return None
+    value = int(raw_value)
+    return value if value in AGE_OPTIONS else None
 
 
-def parse_action_payload(payload: str | None) -> str | None:
-    """Вернуть действие по payload'у кнопки или None."""
+def parse_moral_payload(payload: str | None) -> str | None:
+    """Вернуть мораль по payload'у кнопки или None."""
 
-    return _parse_option(payload, ACTION_PREFIX, ACTION_OPTIONS)
+    return _parse_option(payload, MORAL_PREFIX, MORAL_OPTIONS)
 
 
 def _parse_option(
@@ -70,29 +107,29 @@ def build_upload_photo_keyboard() -> InlineKeyboardBuilder:
     return builder
 
 
-def build_style_keyboard() -> InlineKeyboardBuilder:
-    """Кнопки выбора стиля сказки."""
+def build_age_keyboard() -> InlineKeyboardBuilder:
+    """Кнопки выбора возраста ребёнка (3–6 лет)."""
 
     builder = InlineKeyboardBuilder()
-    for index, style in enumerate(STYLE_OPTIONS):
+    for age in AGE_OPTIONS:
         builder.row(
             CallbackButton(
-                text=style,
-                payload=_option_payload(STYLE_PREFIX, index),
+                text=age_label(age),
+                payload=f"{AGE_PREFIX}{age}",
             )
         )
     return builder
 
 
-def build_action_keyboard() -> InlineKeyboardBuilder:
-    """Кнопки выбора действия игрушки."""
+def build_moral_keyboard() -> InlineKeyboardBuilder:
+    """Кнопки выбора морали из курируемого списка."""
 
     builder = InlineKeyboardBuilder()
-    for index, action in enumerate(ACTION_OPTIONS):
+    for index, moral in enumerate(MORAL_OPTIONS):
         builder.row(
             CallbackButton(
-                text=action,
-                payload=_option_payload(ACTION_PREFIX, index),
+                text=moral,
+                payload=_option_payload(MORAL_PREFIX, index),
             )
         )
     return builder
@@ -112,7 +149,7 @@ def build_subscription_keyboard() -> InlineKeyboardBuilder:
 
 
 def build_restart_keyboard() -> InlineKeyboardBuilder:
-    """Кнопка «Начать заново» после ошибки."""
+    """Кнопка «Начать заново» после ошибки или частичного результата."""
 
     builder = InlineKeyboardBuilder()
     builder.row(
@@ -125,18 +162,19 @@ def build_restart_keyboard() -> InlineKeyboardBuilder:
 
 
 __all__ = [
-    "ACTION_OPTIONS",
-    "ACTION_PREFIX",
+    "AGE_OPTIONS",
+    "AGE_PREFIX",
+    "MORAL_OPTIONS",
+    "MORAL_PREFIX",
     "RESTART_PAYLOAD",
-    "STYLE_OPTIONS",
-    "STYLE_PREFIX",
     "SUBSCRIBE_PAYLOAD",
     "UPLOAD_PHOTO_PAYLOAD",
-    "build_action_keyboard",
+    "age_label",
+    "build_age_keyboard",
+    "build_moral_keyboard",
     "build_restart_keyboard",
-    "build_style_keyboard",
     "build_subscription_keyboard",
     "build_upload_photo_keyboard",
-    "parse_action_payload",
-    "parse_style_payload",
+    "parse_age_payload",
+    "parse_moral_payload",
 ]
