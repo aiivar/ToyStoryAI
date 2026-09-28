@@ -19,6 +19,7 @@ import json
 import types
 from typing import Any, Literal, Union, get_args, get_origin
 
+from loguru import logger
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 
@@ -59,17 +60,53 @@ SCHEMA_META_KEYS = ("description", "properties", "required", "type", "title")
 ANSWER_EXAMPLE_LABEL = "Пример-заготовка правильного ответа:"
 
 # Плейсхолдеры: fields (имена верхнеуровневых полей через запятую),
-# meta_keys (служебные ключи схемы в обратных кавычках), label (маркер
-# примера), example (JSON-заготовка одним объектом).
+# meta_rule (запрет служебных ключей схемы либо пустая строка, если
+# запрещать нечего), label (маркер примера), example (JSON-заготовка
+# одним объектом).
+#
+# Запрет вынесен в отдельную подстановку, а не вшит в шаблон: если модель
+# объявит поле с именем служебного ключа, строка запрета должна исчезнуть
+# целиком, а не повисеть с пустым перечислением.
 ANSWER_FORMAT = (
     "СТРОГАЯ ФОРМА ОТВЕТА (это обязательно и важнее самой схемы):\n"
     "- верни JSON-объект РОВНО с этими верхнеуровневыми ключами: {fields};\n"
-    "- ключи {meta_keys} — служебные ключи самой JSON-схемы, а не данные: "
-    "в ответе их использовать НЕЛЬЗЯ;\n"
+    "{meta_rule}"
     "- {label} {example} — это заготовка ФОРМЫ, подставь вместо неё свои "
     "значения.\n"
     "Других ключей не добавляй, markdown-обёрток и пояснений не пиши."
 )
+
+# Строка запрета служебных ключей: meta_keys — служебные ключи схемы в
+# обратных кавычках. Уже с ведущим переводом строки и точкой с запятой.
+ANSWER_META_RULE = (
+    "- ключи {meta_keys} — служебные ключи самой JSON-схемы, а не данные: "
+    "в ответе их использовать НЕЛЬЗЯ;\n"
+)
+
+
+def model_meta_keys(model: type[BaseModel]) -> tuple[str, ...]:
+    """Служебные ключи JSON-схемы, которых в полях модели НЕТ.
+
+    Запрет в инструкции бессмыслен и вреден, если модель сама объявляет
+    поле с таким именем: тогда промпт велит «вернуть ровно эти ключи:
+    description …» и тут же запрещает `description`. Модель, зацепившаяся
+    за такое противоречие, вернёт мусор — ровно тот класс отказа, ради
+    которого инструкция и появилась.
+
+    Поэтому meta-ключи всегда берутся как разность: пересечение с полями
+    модели выбрасывается, и промпт не может себе противоречить. Модель с
+    таким полем — редкость, но проверка стоит одного `set`, а цена ошибки
+    — каждый вызов этого этапа.
+    """
+
+    collisions = set(SCHEMA_META_KEYS) & set(model.model_fields)
+    if collisions:
+        logger.debug(
+            "story prompts: {} объявляет поля, совпадающие со служебными: {}",
+            model.__name__,
+            sorted(collisions),
+        )
+    return tuple(key for key in SCHEMA_META_KEYS if key not in collisions)
 
 
 def _skeleton_value(annotation: Any) -> Any:
@@ -102,6 +139,18 @@ def _skeleton_value(annotation: Any) -> Any:
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
         return _skeleton_object(annotation)
     if annotation is bool:
+        # Заготовка `True` выбрана бы безопаснее, но осознанно взят `False`.
+        # Схема у `bool` одна на оба значения, поэтому пример не может быть
+        # одновременно «правильным» для обоих, а текст инструкции велит
+        # подставить вместо заготовки свои значения.
+        #
+        # Риск выбора, о котором надо помнить: модель может зацепиться за
+        # `passed: false` как за образец ответа и вернуть его дословно. Для
+        # судьи это значит, что каждый его вызов вердикта будет отрицательным
+        # без разбора текста — петля качества исчерпает бюджет ревизий и
+        # прогонит лишний платный круг. На живых прогонах этого не случилось,
+        # поэтому значение оставлено, но менять его нужно вместе с живой
+        # проверкой судьи, а не «на глаз».
         return False
     if annotation is int:
         return 1
@@ -151,9 +200,16 @@ def render_answer_format(model: type[BaseModel]) -> str:
     """
 
     example = json.dumps(_skeleton_object(model), ensure_ascii=False)
+    meta_keys = model_meta_keys(model)
     return ANSWER_FORMAT.format(
         fields=", ".join(model.model_fields),
-        meta_keys=", ".join(f"`{key}`" for key in SCHEMA_META_KEYS),
+        meta_rule=(
+            ANSWER_META_RULE.format(
+                meta_keys=", ".join(f"`{key}`" for key in meta_keys)
+            )
+            if meta_keys
+            else ""
+        ),
         label=ANSWER_EXAMPLE_LABEL,
         example=example,
     )

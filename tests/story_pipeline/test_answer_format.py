@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from app.story_pipeline.models import (
     ExtractedEntities,
@@ -36,6 +37,7 @@ from app.story_pipeline.models import (
 from app.story_pipeline.prompts import (
     ANSWER_EXAMPLE_LABEL,
     SCHEMA_META_KEYS,
+    model_meta_keys,
     render_answer_format,
 )
 from app.story_pipeline.stages.entity_extractor import EntityExtractorStage
@@ -85,6 +87,66 @@ def test_answer_format_forbids_json_schema_meta_keys() -> None:
     for key in SCHEMA_META_KEYS:
         assert key in rendered
     assert "НЕЛЬЗЯ" in rendered
+
+
+def test_stage_models_do_not_collide_with_schema_meta_keys() -> None:
+    """Ни одна модель этапа не объявляет поле, совпадающее со служебным ключом.
+
+    Пока это так, запрет в инструкции не спорит с перечислением полей. Строка
+    одна, но она держит весь инвариант: добавление в модель поля `title`
+    обязано валить её, иначе промпт сам себе противоречит.
+    """
+
+    collisions = {
+        model.__name__: sorted(set(SCHEMA_META_KEYS) & set(model.model_fields))
+        for model in STAGE_RESPONSE_MODELS
+    }
+
+    assert {name: keys for name, keys in collisions.items() if keys} == {}
+
+
+def test_model_meta_keys_drop_colliding_field() -> None:
+    """Совпадающее поле выпадает из запрета, а не конфликтует с ним.
+
+    Синтетическая модель повторяет тот баг, который инструкция чинит: если
+    бы в модели было поле `description`, промпт велел бы вернуть ключ
+    `description` и тут же запрещал его.
+    """
+
+    class Colliding(BaseModel):
+        description: str
+        title: str
+
+    rendered = render_answer_format(Colliding)
+
+    assert "верни JSON-объект РОВНО" in rendered
+    # Поле осталось в перечислении, а запрета на него больше нет.
+    assert "description" in rendered.split(ANSWER_EXAMPLE_LABEL)[0]
+    assert "`description`" not in rendered
+    assert "`title`" not in rendered
+    assert "НЕЛЬЗЯ" in rendered  # запрет остался — но не на эти поля
+    # Остальные служебные ключи, не совпавшие с полями, запрещены по-прежнему.
+    for key in ("properties", "required", "type"):
+        assert f"`{key}`" in rendered
+    assert model_meta_keys(Colliding) == ("properties", "required", "type")
+
+
+def test_answer_format_without_meta_rule_keeps_the_text_readable() -> None:
+    """Без запрещаемых ключей в шаблоне не остаётся дыр и висячих строк."""
+
+    class AllColliding(BaseModel):
+        description: str
+        properties: str
+        required: str
+        type: str
+        title: str
+
+    rendered = render_answer_format(AllColliding)
+
+    assert "НЕЛЬЗЯ" not in rendered
+    assert ";;" not in rendered
+    assert rendered.count("\n\n") == 0
+    assert ANSWER_EXAMPLE_LABEL in rendered
 
 
 @pytest.mark.parametrize("model", STAGE_RESPONSE_MODELS, ids=lambda m: m.__name__)
