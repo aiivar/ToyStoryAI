@@ -82,6 +82,10 @@ ALREADY_RUNNING = (
     "Сказка уже готовится, второй прогон не запускаю. Страницы придут "
     "сюда по мере готовности."
 )
+GENERATION_FINISHED = (
+    "Эта сказка уже готова — страницы пришли выше. Чтобы сделать новую, "
+    "начните заново."
+)
 RESTART_HINT = "Давайте начнём заново. Пришлите фото игрушки."
 SUBSCRIPTION_STUB = (
     "Покупка подписки пока недоступна — мы работаем над этим. "
@@ -350,7 +354,18 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
             )
             return
         if state == StoryFlow.generating:
-            await _reply(event.message.answer, ALREADY_RUNNING)
+            # Состояние `generating` переживает конец прогона: фоновая задача
+            # снята с учёта, а состояние осталось. Поэтому истина о том, идёт
+            # ли генерация, берётся из реестра, а не из FSM — иначе
+            # пользователь после успеха вечно получал бы «уже готовится».
+            if runs.is_running(_extract_user_id(event)):
+                await _reply(event.message.answer, ALREADY_RUNNING)
+                return
+            await _reply(
+                event.message.answer,
+                GENERATION_FINISHED,
+                [build_restart_keyboard().as_markup()],
+            )
             return
         logger.info("Ожидалось фото, получено иное сообщение — прошу фото")
         await _reply(event.message.answer, NOT_A_PHOTO)

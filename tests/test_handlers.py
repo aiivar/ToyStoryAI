@@ -535,3 +535,37 @@ async def test_text_message_during_generation_says_run_in_progress(
 
     release.set()
     await registered.runs.wait_idle()
+
+
+async def test_text_message_after_generation_offers_restart(
+    settings: Settings,
+    repository: GenerationRepository,
+    storage: PhotoStorage,
+) -> None:
+    """После завершения прогона состояние `generating` не вводит в заблуждение.
+
+    Реестр снял прогон с учёта, а состояние FSM осталось прежним: без
+    проверки реестра пользователь получал бы «уже готовится» вечно.
+    """
+
+    registered, _ = _register(
+        settings,
+        repository,
+        storage,
+        download_photo=_photo_download(make_photo_bytes(400, 400)),
+    )
+    context = FakeContext(state=StoryFlow.waiting_photo)
+    await _prepare_dialog(registered, context)
+    await registered.callback(FakeMessageCallback("age:4"), context)
+    await registered.callback(FakeMessageCallback("moral:0"), context)
+    await registered.runs.wait_idle()
+
+    event = FakeMessageCreated(FakeMessage())
+    await registered.other_message(
+        event, FakeContext(state=StoryFlow.generating)
+    )
+
+    assert event.message.sent_texts == [handlers_module.GENERATION_FINISHED]
+    assert keyboard_labels(event.message.sent[-1].attachments) == [
+        ["Начать заново"]
+    ]
