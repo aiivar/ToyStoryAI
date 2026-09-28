@@ -18,6 +18,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from app.story_pipeline.artifacts import write_story_json
 from app.story_pipeline.errors import StoryPipelineError
 from app.story_pipeline.models import StoryState
 from app.story_pipeline.pipeline import StoryPipeline
@@ -39,9 +40,6 @@ _EXIT_OK = 0
 
 # Формат метки каталога прогона: секундная точность, сортируется лексикографически.
 _TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
-
-# Имя файла полного состояния прогона.
-_STORY_FILENAME = "story.json"
 
 
 def run_cli(
@@ -116,7 +114,8 @@ def run_cli(
         )
         return _EXIT_FAILURE
 
-    _write_story_json(run_dir, state)
+    write_story_json(run_dir, state)
+
     print(f"Статус: {state.status}")
     print(f"Каталог результатов: {run_dir}")
     return _EXIT_OK
@@ -196,23 +195,6 @@ def _resolve_run_dir(
         else Path(settings.story_output_dir)
     )
     return root / now().strftime(_TIMESTAMP_FORMAT)
-
-
-def _write_story_json(run_dir: Path, state: StoryState) -> None:
-    """Записать полное состояние прогона в ``story.json``.
-
-    Каталог создаётся здесь: к моменту записи этап иллюстрирования уже
-    наполнил его файлами иллюстраций, а `exist_ok` страхует будущие графы без
-    иллюстраций. Так при сбое до записи пустой каталог не остаётся.
-    """
-
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / _STORY_FILENAME).write_text(
-        json.dumps(
-            state.model_dump(mode="json"), ensure_ascii=False, indent=2
-        ),
-        encoding="utf-8",
-    )
 
 
 def _utcnow() -> datetime:
