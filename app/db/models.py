@@ -10,7 +10,7 @@ from __future__ import annotations
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, DateTime, Enum, String, Text
+from sqlalchemy import BigInteger, DateTime, Enum, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -83,6 +83,20 @@ class Generation(Base):
         nullable=True,
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Содержимое постраничной книжки.
+    pages_count: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Сколько страниц в выданной сказке; None у старых записей",
+    )
+    output_dir: Mapped[str | None] = mapped_column(
+        String(1024),
+        nullable=True,
+        comment=(
+            "Каталог прогона: диагностическое поле, ссылку в чат не отдаём"
+        ),
+    )
 
     def __repr__(self) -> str:  # pragma: no cover - отладочное представление
         return (
