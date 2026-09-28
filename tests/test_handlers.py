@@ -99,6 +99,24 @@ async def test_start_sends_greeting_and_photo_button(
     assert context.state == StoryFlow.waiting_photo
 
 
+def test_greeting_describes_pages_and_never_video() -> None:
+    """Приветствие обещает книжку со страницами и не обещает видео.
+
+    Продукт больше не выдаёт видео, поэтому текст должен называть именно то,
+    что пользователь получит: сказку с картинками по одной странице в
+    сообщении. Проверка ловит возврат старого текста с «видео».
+    """
+
+    greeting = handlers_module.GREETING.lower()
+
+    assert "страниц" in greeting
+    assert "видео" not in greeting
+    # Шаги диалога прежние: фото → возраст → мораль.
+    assert "фото" in greeting
+    assert "возраст" in greeting
+    assert "морал" in greeting
+
+
 async def test_bot_started_sends_greeting_and_photo_button(
     settings: Settings,
     repository: GenerationRepository,
