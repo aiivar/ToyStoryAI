@@ -14,6 +14,10 @@ from app.db.repository import GenerationRepository
 
 TMP_ROOT = Path(".tmp/tests")
 
+# Текст сказки прежнего формата: 150–300 слов одним абзацем, тип `tale`.
+# Именно такие записи лежат в боевой `bot.db` и должны засчитываться в квоту.
+OLD_TALE_TEXT = " ".join(["Жил-был зайчик."] * 120)
+
 
 # --- Задачи 2.1 и 2.2: модель и создание схемы ------------------------------
 
@@ -155,54 +159,7 @@ async def test_history_is_isolated_per_user(
     assert foreign.id not in {item.id for item in history}
 
 
-# --- Задача 2.4: запрос квоты -----------------------------------------------
-
-
-async def test_quota_used_when_tale_and_video_succeed(
-    repository: GenerationRepository,
-) -> None:
-    """Квота израсходована: есть и успешная сказка, и успешное видео."""
-
-    tale = await repository.create_tale(505)
-    video = await repository.create_video(505, request_id="req-3")
-    await repository.update_result(
-        tale.id,
-        status=GenerationStatus.SUCCESS,
-        tale_text="text",
-    )
-    await repository.update_result(
-        video.id,
-        status=GenerationStatus.SUCCESS,
-        video_url="https://cdn/v.mp4",
-    )
-
-    assert await repository.has_completed_full_generation(505) is True
-
-
-async def test_quota_not_used_with_only_tale(
-    repository: GenerationRepository,
-) -> None:
-    """Квота не израсходована, пока нет успешного видео."""
-
-    tale = await repository.create_tale(606)
-    await repository.update_result(
-        tale.id,
-        status=GenerationStatus.SUCCESS,
-        tale_text="text",
-    )
-
-    assert await repository.has_completed_full_generation(606) is False
-
-
-async def test_quota_not_used_for_new_user(
-    repository: GenerationRepository,
-) -> None:
-    """У нового пользователя квота не израсходована."""
-
-    assert await repository.has_completed_full_generation(707) is False
-
-
-# --- Квота «одна завершённая сказка» (has_completed_tale) --------------------
+# --- Квота «одна завершённая сказка» (задачи 2.4 и 6.2) --------------------
 
 
 async def test_completed_tale_counts_as_used_story(
@@ -210,31 +167,49 @@ async def test_completed_tale_counts_as_used_story(
 ) -> None:
     """Успешная сказка — использованная бесплатная сказка."""
 
-    assert await repository.has_completed_tale(808) is False
+    assert await repository.has_completed_story(808) is False
 
     tale = await repository.create_tale(808)
     await repository.update_result(
         tale.id, status=GenerationStatus.SUCCESS, tale_text="text"
     )
 
-    assert await repository.has_completed_tale(808) is True
+    assert await repository.has_completed_story(808) is True
 
 
-async def test_old_style_tale_with_video_counts_as_used_story(
+async def test_old_format_tale_with_video_counts_as_used_story(
     repository: GenerationRepository,
 ) -> None:
-    """Старая успешная сказка прежнего формата тоже засчитывается."""
+    """Старая успешная сказка прежнего формата тоже засчитывается (D19).
+
+    У прежних записей был ещё и успешный видеопрогон: без этого теста легко
+    было бы сузить предикат до нового формата и отдать бесплатную книжку
+    пользователю, который уже получил сказку.
+    """
 
     tale = await repository.create_tale(909)
     video = await repository.create_video(909, request_id="old")
     await repository.update_result(
-        tale.id, status=GenerationStatus.SUCCESS, tale_text="text"
+        tale.id, status=GenerationStatus.SUCCESS, tale_text=OLD_TALE_TEXT
     )
     await repository.update_result(
         video.id, status=GenerationStatus.SUCCESS, video_url="https://cdn/v.mp4"
     )
 
-    assert await repository.has_completed_tale(909) is True
+    assert await repository.has_completed_story(909) is True
+
+
+async def test_old_format_tale_without_video_counts_as_used_story(
+    repository: GenerationRepository,
+) -> None:
+    """Старая успешная сказка засчитывается и без успешного видео."""
+
+    tale = await repository.create_tale(919)
+    await repository.update_result(
+        tale.id, status=GenerationStatus.SUCCESS, tale_text=OLD_TALE_TEXT
+    )
+
+    assert await repository.has_completed_story(919) is True
 
 
 async def test_failed_or_partial_run_keeps_story_available(
@@ -254,7 +229,7 @@ async def test_failed_or_partial_run_keeps_story_available(
         error="нет картинок",
     )
 
-    assert await repository.has_completed_tale(1010) is False
+    assert await repository.has_completed_story(1010) is False
 
 
 async def test_in_progress_run_does_not_consume_story(
@@ -264,7 +239,7 @@ async def test_in_progress_run_does_not_consume_story(
 
     await repository.create_tale(1111)
 
-    assert await repository.has_completed_tale(1111) is False
+    assert await repository.has_completed_story(1111) is False
 
 
 async def test_story_of_another_user_does_not_count(
@@ -277,7 +252,7 @@ async def test_story_of_another_user_does_not_count(
         other.id, status=GenerationStatus.SUCCESS, tale_text="text"
     )
 
-    assert await repository.has_completed_tale(1313) is False
+    assert await repository.has_completed_story(1313) is False
 
 
 async def test_quota_not_used_with_only_failures(
@@ -298,7 +273,27 @@ async def test_quota_not_used_with_only_failures(
         error="kling timeout",
     )
 
-    assert await repository.has_completed_full_generation(808) is False
+    assert await repository.has_completed_story(808) is False
+
+
+async def test_video_success_alone_does_not_consume_story(
+    repository: GenerationRepository,
+) -> None:
+    """Одного успешного видеопрогона для квоты недостаточно."""
+
+    video = await repository.create_video(818, request_id="req-5")
+    await repository.update_result(
+        video.id, status=GenerationStatus.SUCCESS, video_url="https://cdn/v.mp4"
+    )
+
+    assert await repository.has_completed_story(818) is False
+
+
+def test_dead_quota_method_is_gone() -> None:
+    """Мёртвый предикат про «сказка + видео» удалён из репозитория."""
+
+    assert not hasattr(GenerationRepository, "has_completed_full_generation")
+    assert hasattr(GenerationRepository, "has_completed_story")
 
 
 async def test_model_repr_mentions_identity() -> None:

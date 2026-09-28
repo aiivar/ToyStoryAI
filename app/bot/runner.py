@@ -325,7 +325,7 @@ class StoryRunner:
 
         send = self._sender_for(request.chat_id)
 
-        if await self._repository.has_completed_tale(request.user_id):
+        if await self._repository.has_completed_story(request.user_id):
             logger.info(
                 "Квота пользователя {} израсходована, прогон не запускаю",
                 request.user_id,

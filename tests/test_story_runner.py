@@ -184,7 +184,7 @@ class FakeRepository:
     ) -> None:
         self.updates.append({"generation_id": generation_id, **kwargs})
 
-    async def has_completed_tale(self, user_id: int) -> bool:
+    async def has_completed_story(self, user_id: int) -> bool:
         self.quota_checks.append(user_id)
         return self.story_used
 
@@ -483,6 +483,15 @@ async def test_free_story_is_allowed_for_new_user(tmp_path: Path) -> None:
     assert runner_module.FREE_LIMIT_REACHED not in [
         text for text in bundle.bot.sent_texts
     ]
+
+
+def test_quota_text_talks_about_story_only() -> None:
+    """Текст исчерпанной квоты — про сказку и без упоминания видео."""
+
+    text = runner_module.FREE_LIMIT_REACHED.lower()
+    assert "сказк" in text
+    assert "видео" not in text
+    assert "подписк" in text
 
 
 # --- 5.5: постраничная выдача ------------------------------------------------

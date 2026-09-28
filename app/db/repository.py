@@ -1,7 +1,7 @@
 """Репозиторий истории генераций.
 
 Инкапсулирует операции записи и чтения записей `Generation`, включая
-запрос квоты: израсходована ли у пользователя бесплатная полная генерация.
+запрос квоты: получена ли пользователем бесплатная сказка.
 """
 
 from __future__ import annotations
@@ -138,17 +138,15 @@ class GenerationRepository:
             result = await session.execute(statement)
             return result.scalars().all()
 
-    async def has_completed_tale(self, user_id: int) -> bool:
+    async def has_completed_story(self, user_id: int) -> bool:
         """Есть ли у пользователя завершённая сказка (бесплатная квота).
 
-        Отдельный метод от `has_completed_full_generation` не по прихоти:
-        прежний требует ещё и успешного видео, а в новом флоу видео больше
-        нет, поэтому он не выражает правило «одна бесплатная сказка».
-        Старые успешные сказки (прежний формат) этой проверкой тоже
-        засчитываются, как и требовалось.
+        Правило одно: одна завершённая сказка на пользователя (D11). Тип
+        записи прежней версии — тоже `tale`, поэтому старые успешные
+        сказки прежнего формата засчитываются автоматически (D19), и
+        пользователь, уже получивший сказку, не получает книжку бесплатно.
 
-        Задача 6.2 заменит пару методов на один `has_completed_story`; пока
-        старый метод нужен прежнему коду, удалять его рано.
+        Частичный прогон и ошибка квоту не занимают: их статус `FAILED`.
         """
 
         statement = select(func.count()).select_from(Generation).where(
@@ -160,31 +158,6 @@ class GenerationRepository:
         async with self._db.session_scope() as session:
             result = await session.execute(statement)
             return bool(result.scalar())
-
-    async def has_completed_full_generation(self, user_id: int) -> bool:
-        """Израсходована ли бесплатная полная генерация пользователя.
-
-        Считается израсходованной, если в истории пользователя есть и
-        успешно завершённая сказка, и успешно завершённое видео.
-        """
-
-        statement = (
-            select(Generation.type)
-            .where(
-                Generation.user_id == user_id,
-                Generation.status == GenerationStatus.SUCCESS,
-            )
-            .distinct()
-        )
-
-        async with self._db.session_scope() as session:
-            result = await session.execute(statement)
-            completed_types = set(result.scalars().all())
-
-        return {
-            GenerationType.TALE,
-            GenerationType.VIDEO,
-        }.issubset(completed_types)
 
 
 __all__ = ["GenerationRepository"]
