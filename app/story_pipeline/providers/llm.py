@@ -27,6 +27,7 @@ from app.story_pipeline.errors import (
     SchemaValidationError,
     TransientLLMError,
 )
+from app.story_pipeline.prompts import SCHEMA_CORRECTION_USER
 from app.story_pipeline.settings import StorySettings
 
 # Тип ответа LLM: конкретная pydantic-модель этапа.
@@ -46,6 +47,20 @@ class Usage(BaseModel):
 
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+
+
+def build_schema_correction_prompt(
+    user: str,
+    error: SchemaValidationError,
+) -> str:
+    """Собрать корректирующий промпт клиента из шаблона `prompts.py`.
+
+    Текст обращения к модели живёт в `prompts.py`
+    (`SCHEMA_CORRECTION_USER`);
+    клиент только подставляет данные — исходный запрос и описание ошибки.
+    """
+
+    return SCHEMA_CORRECTION_USER.format(user=user, error=error)
 
 
 def render_schema(model: type[BaseModel]) -> str:
@@ -127,7 +142,7 @@ class DeepSeekLLMClient:
             try:
                 return await self._request_with_retries(
                     system=system,
-                    user=self._build_correction_prompt(user, first_error),
+                    user=build_schema_correction_prompt(user, first_error),
                     schema=schema,
                     temperature=temperature,
                 )
@@ -264,18 +279,6 @@ class DeepSeekLLMClient:
             ) from exc
 
     @staticmethod
-    def _build_correction_prompt(user: str, error: SchemaValidationError) -> str:
-        """Дополнить промпт описанием схемной ошибки для перезапроса."""
-
-        return (
-            f"{user}\n\n"
-            "Предыдущий ответ не соответствовал требуемой JSON-схеме. "
-            f"Ошибка: {error}. "
-            "Верни исправленный ответ строго в формате JSON по той же схеме, "
-            "без markdown-обёрток и пояснений."
-        )
-
-    @staticmethod
     def _strip_code_fence(content: str) -> str:
         """Снять markdown-обёртку блока кода и вернуть полезную нагрузку."""
 
@@ -333,5 +336,6 @@ __all__ = [
     "DeepSeekLLMClient",
     "LLMClient",
     "Usage",
+    "build_schema_correction_prompt",
     "render_schema",
 ]

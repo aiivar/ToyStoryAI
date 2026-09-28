@@ -72,12 +72,12 @@ Plan → Script → Extract → Scene → validate_scene_refs (+repair)
 *Рассматривалась альтернатива:* отдельный клиент на каждый этап — отклонено как дублирование логики разбора и ретраев.
 
 ### D6: Все промпты — в `prompts.py`
-Константы по этапам (`PLANNER_*`, `SCREENWRITER_*`, `EXTRACTOR_*`, `SCENE_*`, `SCENE_REPAIR_*`, `JUDGE_*`, `REVISER_*`) плюс `ART_STYLE_DEFAULT`. Никаких промптов в других модулях.
+Константы по этапам (`PLANNER_*`, `SCREENWRITER_*`, `EXTRACTOR_*`, `SCENE_*`, `SCENE_REPAIR_*`, `SCENE_COVERAGE_REPAIR_*`, `JUDGE_*`, `REVISER_*`, `SCHEMA_CORRECTION_USER`), формулировки проблем валидаторов и `ART_STYLE_DEFAULT`. Никаких промптов в других модулях. Инвариант проверяется тестом `test_prompts_centralization.py` по AST: вне `prompts.py` запрещены строковые литералы, из которых собирается текст обращения к модели (получатель `.format(...)`, аргументы `complete_json(user=..., system=...)`).
 
 *Почему:* прямое требование критерия приёмки №5; правки формулировок локализованы и не требуют чтения кода этапов.
 
 ### D7: Чистые функции для сборки промптов и валидации
-`build_art_prompt(scene, entities)`, `build_character_sheet_prompt(entities)`, `validate_page_count`, `validate_scene_refs`, `validate_judge_verdict` — без LLM и без I/O.
+`build_art_prompt(scene, entities)`, `build_character_sheet_prompt(entities)`, `validate_page_count`, `validate_scene_coverage`, `validate_scene_refs`, `validate_judge_verdict` — без LLM и без I/O.
 
 *Почему:* выполнимо требование критерия приёмки №4 (юнит-тесты на `prompt_builder`), а дешёвые детерминированные проверки заменяют надежду на качество промпта.
 

@@ -21,10 +21,16 @@ from app.story_pipeline.models import (
     StoryState,
 )
 from app.story_pipeline.prompts import (
+    DUPLICATE_PAGE_NUMBERS,
+    EXPECTED_PAGE_COUNT,
+    MISSING_PAGE_NUMBERS,
+    PAGE_NUMBERS_ONE_BASED,
     SCREENWRITER_REPAIR_USER,
     SCREENWRITER_SYSTEM,
     SCREENWRITER_USER,
+    duplicate_page_numbers,
     format_arc_plan,
+    format_page_numbers,
 )
 from app.story_pipeline.providers.llm import LLMClient, render_schema
 from app.story_pipeline.stages._usage import add_tokens
@@ -41,29 +47,24 @@ def validate_page_count(pages: list[PageText], num_pages: int) -> list[str]:
     """
 
     problems: list[str] = []
+    numbers = [page.page_num for page in pages]
     if any(page.page_num < 1 for page in pages):
-        problems.append("Номера страниц должны начинаться с 1 (1-based).")
+        problems.append(PAGE_NUMBERS_ONE_BASED)
     if len(pages) != num_pages:
         problems.append(
-            f"Ожидалось ровно {num_pages} страниц, получено {len(pages)}."
+            EXPECTED_PAGE_COUNT.format(expected=num_pages, actual=len(pages))
         )
-    present = {page.page_num for page in pages}
-    numbers = [page.page_num for page in pages]
-    duplicates = sorted(
-        number for number in present if numbers.count(number) > 1
-    )
+    duplicates = duplicate_page_numbers(numbers)
     if duplicates:
         problems.append(
-            "Дублирующиеся номера страниц: "
-            + ", ".join(str(number) for number in duplicates)
-            + "."
+            DUPLICATE_PAGE_NUMBERS.format(
+                numbers=format_page_numbers(duplicates)
+            )
         )
-    missing = sorted(set(range(1, num_pages + 1)) - present)
+    missing = sorted(set(range(1, num_pages + 1)) - set(numbers))
     if missing:
         problems.append(
-            "Отсутствуют номера страниц: "
-            + ", ".join(str(number) for number in missing)
-            + "."
+            MISSING_PAGE_NUMBERS.format(numbers=format_page_numbers(missing))
         )
     return problems
 

@@ -28,7 +28,12 @@ from app.story_pipeline.providers.image import (
     GeneratedImage,
     MockImageProvider,
 )
-from app.story_pipeline.stages.image_generator import ImageGeneratorStage
+from app.story_pipeline.stages.image_generator import (
+    CHARACTER_SHEET_SEED,
+    ImageGeneratorStage,
+    page_filename,
+    page_seed,
+)
 from app.story_pipeline.stages.prompt_builder import (
     build_art_prompt,
     build_character_sheet_prompt,
@@ -72,6 +77,7 @@ def _state(output_dir: Path, num_scenes: int = 2) -> StoryState:
         theme="дружба",
         age=5,
         moral="помогай друзьям",
+        num_pages=num_scenes,
         entities=_entities(),
         scenes=[_scene(n) for n in range(1, num_scenes + 1)],
         output_dir=str(output_dir),
@@ -232,3 +238,114 @@ async def test_stage_with_real_mock_writes_valid_pngs(tmp_path: Path) -> None:
     for art in state.images:
         assert Path(art.path).read_bytes().startswith(signature)
     assert state.status == "ok"
+
+
+# --- Seed генерации ------------------------------------------------------
+
+
+def test_page_seed_is_deterministic_and_distinct_per_page() -> None:
+    """Seed страницы выводится из её номера: стабилен и различен у соседей."""
+
+    assert page_seed(1) == page_seed(1)
+    assert page_seed(1) != page_seed(2)
+    # Номера страниц не влияют на seed соседних прогонов друг друга.
+    assert page_seed(2) == page_seed(2)
+
+
+async def test_provider_receives_distinct_seed_per_page(
+    tmp_path: Path,
+    fake_image_provider,
+) -> None:
+    """Каждая страница и лист персонажей запрашиваются со своим seed."""
+
+    state = _state(tmp_path, num_scenes=3)
+    provider = fake_image_provider()
+
+    await ImageGeneratorStage(provider).run(state)
+
+    seeds = [call["seed"] for call in provider.calls]
+    assert seeds[0] == CHARACTER_SHEET_SEED
+    assert seeds[1:] == [page_seed(1), page_seed(2), page_seed(3)]
+    assert len(set(seeds[1:])) == 3
+
+
+async def test_page_art_records_requested_seed(
+    tmp_path: Path,
+    fake_image_provider,
+) -> None:
+    """Seed провайдера пишется в `PageArt` и в seed character sheet."""
+
+    state = _state(tmp_path, num_scenes=2)
+    provider = fake_image_provider(
+        responses=[
+            GeneratedImage(data=b"sheet", seed=CHARACTER_SHEET_SEED),
+            GeneratedImage(data=b"page-1", seed=page_seed(1)),
+            GeneratedImage(data=b"page-2", seed=page_seed(2)),
+        ]
+    )
+
+    await ImageGeneratorStage(provider).run(state)
+
+    assert state.character_sheet_seed == CHARACTER_SHEET_SEED
+    assert [art.seed for art in state.images] == [
+        page_seed(1),
+        page_seed(2),
+    ]
+    # Ни один seed не остался пустым: поле заполнено для всех страниц.
+    assert all(art.seed is not None for art in state.images)
+
+
+async def test_mock_pages_are_byte_distinct(tmp_path: Path) -> None:
+    """В mock-режиме страницы не совпадают байт-в-байт."""
+
+    state = _state(tmp_path, num_scenes=3)
+
+    await ImageGeneratorStage(MockImageProvider()).run(state)
+
+    payloads = [Path(art.path).read_bytes() for art in state.images]
+    assert len(set(payloads)) == len(payloads)
+    # Лист персонажей не совпадает ни с одной страницей.
+    sheet = (tmp_path / "character_sheet.png").read_bytes()
+    assert sheet not in payloads
+
+
+# --- Контроль полноты покрытия страниц ----------------------------------
+
+
+async def test_missing_page_png_marks_needs_review(
+    tmp_path: Path,
+    fake_image_provider,
+) -> None:
+    """Прогон не может завершиться `ok`, если файл какой-то страницы пропал.
+
+    Регрессия на исходный дефект: сцены для страниц 1 и 3 при трёх
+    страницах давали `character_sheet.png`, `page_1.png`, `page_3.png` и
+    итоговый `status == "ok"` — файл `page_2.png` просто отсутствовал.
+    """
+
+    state = _state(tmp_path, num_scenes=3)
+    state.scenes = [_scene(1), _scene(3)]
+
+    await ImageGeneratorStage(fake_image_provider()).run(state)
+
+    assert not (tmp_path / "page_2.png").exists()
+    assert state.status == "needs_review"
+    metric = state.metrics[-1]
+    assert metric.stage == "illustrate"
+    assert metric.error is not None
+    assert "2" in metric.error
+
+
+async def test_scene_out_of_range_cannot_report_ok(
+    tmp_path: Path,
+    fake_image_provider,
+) -> None:
+    """Сцена с номером вне 1..N тоже оставляет прогон без статуса `ok`."""
+
+    state = _state(tmp_path, num_scenes=2)
+    state.scenes = [_scene(1), _scene(7)]
+
+    await ImageGeneratorStage(fake_image_provider()).run(state)
+
+    assert state.status == "needs_review"
+    assert state.metrics[-1].error is not None

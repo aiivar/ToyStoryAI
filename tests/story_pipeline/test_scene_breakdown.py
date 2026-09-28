@@ -10,7 +10,10 @@ from datetime import datetime, timezone
 
 import pytest
 
-from app.story_pipeline.errors import StoryPipelineError
+from app.story_pipeline.errors import (
+    PipelineValidationError,
+    StoryPipelineError,
+)
 from app.story_pipeline.models import (
     Character,
     ExtractedEntities,
@@ -24,6 +27,7 @@ from app.story_pipeline.models import (
 )
 from app.story_pipeline.stages.scene_breakdown import (
     SceneBreakdownStage,
+    validate_scene_coverage,
     validate_scene_refs,
 )
 
@@ -305,7 +309,7 @@ async def test_scene_breakdown_repair_prompt_includes_current_page_context(
     )
     llm = fake_llm(
         [
-            ScenesPayload(scenes=[bad_page]),
+            ScenesPayload(scenes=[bad_page, _scene(2)]),
             ScenesPayload(scenes=[fixed_page]),
         ]
     )
@@ -342,7 +346,7 @@ async def test_scene_breakdown_repair_keeps_original_scene_description(
     )
     llm = fake_llm(
         [
-            ScenesPayload(scenes=[bad_page]),
+            ScenesPayload(scenes=[bad_page, _scene(2)]),
             ScenesPayload(scenes=[rewritten_page]),
         ]
     )
@@ -385,3 +389,212 @@ async def test_scene_breakdown_marks_unresolved_pages_without_failing(
     assert state.unresolved_pages == [1]
     # Проблемное имя сохранено в сцене, а не удалено молча.
     assert state.scenes[0].characters_in_scene == ["Дракон"]
+
+
+# --- Чистая функция validate_scene_coverage ------------------------------
+
+
+def test_validate_scene_coverage_accepts_one_scene_per_page() -> None:
+    """Ровно одна сцена на страницу 1..N — проблем с покрытием нет."""
+
+    assert validate_scene_coverage([_scene(1), _scene(2)], 2) == []
+
+
+def test_validate_scene_coverage_reports_fewer_scenes_than_pages() -> None:
+    """Меньше сцен, чем страниц (в том числе при полном покрытии части)."""
+
+    problems = validate_scene_coverage([_scene(1)], 3)
+
+    assert problems
+    assert any("3" in problem and "1" in problem for problem in problems)
+
+
+def test_validate_scene_coverage_reports_gap_in_numbering() -> None:
+    """Разрыв покрытия: страница 3 без сцены, при этом номер 4 лишний."""
+
+    problems = validate_scene_coverage([_scene(1), _scene(2), _scene(4)], 3)
+
+    assert any("3" in problem for problem in problems)
+    assert any("4" in problem for problem in problems)
+
+
+def test_validate_scene_coverage_reports_number_out_of_range() -> None:
+    """Номер сцены за пределами 1..N — проблема диапазона."""
+
+    problems = validate_scene_coverage([_scene(1), _scene(2), _scene(7)], 3)
+
+    assert any(
+        "вне диапазона" in problem and "7" in problem for problem in problems
+    )
+
+
+def test_validate_scene_coverage_reports_duplicates() -> None:
+    """Повторяющийся `page_num` — проблема: на страницу пришло два кадра."""
+
+    problems = validate_scene_coverage([_scene(1), _scene(1), _scene(2)], 2)
+
+    assert any(
+        "дубл" in problem.lower() and "1" in problem for problem in problems
+    )
+
+
+def test_validate_scene_coverage_reports_non_one_based_number() -> None:
+    """Номер 0 (не 1-based) — проблема нумерации с 1.
+
+    `PageScene.page_num` требует `ge=1`, поэтому такой ответ отклоняется ещё
+    схемой; функция обязана ловить нарушение и на всякий случай.
+    """
+
+    scenes = [
+        PageScene.model_construct(
+            page_num=0,
+            scene_description="Нулевая сцена.",
+            characters_in_scene=[],
+            location="",
+            objects_in_scene=[],
+        )
+    ] + [_scene(n) for n in (1, 2)]
+    problems = validate_scene_coverage(scenes, 2)
+
+    assert any("начинаться с 1" in problem for problem in problems)
+
+
+# --- Корректирующий перезапрос покрытия страниц --------------------------
+
+
+async def test_scene_breakdown_repairs_missing_page_once(fake_llm) -> None:
+    """Страница без сцены вызывает ровно один адресный перезапрос."""
+
+    llm = fake_llm(
+        [
+            ScenesPayload(scenes=[_scene(1)]),
+            ScenesPayload(scenes=[_scene(2)]),
+        ]
+    )
+    stage = SceneBreakdownStage(llm)
+    state = _state()
+
+    await stage.run(state)
+
+    assert llm.call_count == 2
+    repair_user = llm.calls[1]["user"]
+    # Проблема названа явно, номера страниц — в сообщении и в контексте.
+    assert "Отсутствуют номера страниц" in repair_user
+    assert "Страница 2" in repair_user
+    # Восстановленная сцена записана, покрытие страниц полное.
+    assert [scene.page_num for scene in state.scenes] == [1, 2]
+    assert state.unresolved_pages == []
+
+
+async def test_scene_breakdown_raises_when_coverage_not_restored(
+    fake_llm,
+) -> None:
+    """Если перезапрос не закрыл пробел в покрытии — типизированная ошибка."""
+
+    llm = fake_llm(
+        [
+            ScenesPayload(scenes=[_scene(1)]),
+            ScenesPayload(scenes=[_scene(1)]),
+        ]
+    )
+    stage = SceneBreakdownStage(llm)
+    state = _state()
+
+    with pytest.raises(PipelineValidationError):
+        await stage.run(state)
+
+    assert llm.call_count == 2
+    # Состояние не «спасается» молча: раскадровка не записана.
+    assert state.scenes == []
+
+
+async def test_scene_breakdown_drops_out_of_range_scene_after_repair(
+    fake_llm,
+) -> None:
+    """Номер сцены вне 1..N не доезжает до состояния после починки."""
+
+    state = _state()
+    state.num_pages = 3
+    state.pages.append(
+        PageText(page_num=3, text="Мишка и заяц вернулись домой.")
+    )
+    llm = fake_llm(
+        [
+            ScenesPayload(scenes=[_scene(1), _scene(2), _scene(7)]),
+            ScenesPayload(scenes=[_scene(3)]),
+        ]
+    )
+    stage = SceneBreakdownStage(llm)
+
+    await stage.run(state)
+
+    assert [scene.page_num for scene in state.scenes] == [1, 2, 3]
+
+
+async def test_scene_breakdown_repairs_duplicate_page_numbers(
+    fake_llm,
+) -> None:
+    """Дубль `page_num` устраняется адресным перезапросом, а не перезаписью."""
+
+    llm = fake_llm(
+        [
+            ScenesPayload(scenes=[_scene(1), _scene(1), _scene(2)]),
+            ScenesPayload(scenes=[_scene(1)]),
+        ]
+    )
+    stage = SceneBreakdownStage(llm)
+    state = _state()
+
+    result = await stage.run(state)
+
+    assert result is state
+    assert llm.call_count == 2
+    assert "Дублирующиеся номера страниц" in llm.calls[1]["user"]
+    # На каждую страницу — ровно одна сцена, значит один файл на страницу.
+    assert [scene.page_num for scene in state.scenes] == [1, 2]
+    assert state.unresolved_pages == []
+
+
+async def test_scene_breakdown_raises_when_duplicate_persists(
+    fake_llm,
+) -> None:
+    """Дубль после перезапроса роняет этап типизированной ошибкой."""
+
+    llm = fake_llm(
+        [
+            ScenesPayload(scenes=[_scene(1), _scene(1), _scene(2)]),
+            ScenesPayload(scenes=[_scene(1), _scene(1)]),
+        ]
+    )
+    stage = SceneBreakdownStage(llm)
+    state = _state()
+
+    with pytest.raises(PipelineValidationError):
+        await stage.run(state)
+
+    assert state.scenes == []
+
+
+async def test_scene_breakdown_rejects_scene_for_absent_page(fake_llm) -> None:
+    """Схемно-валидная сцена чужой страницы не попадает в состояние.
+
+    Регрессия на исходный дефект: сцены только для страниц 1 и 3 при трёх
+    страницах давали `status == "ok"` без файла `page_2.png`.
+    """
+
+    state = _state()
+    state.num_pages = 3
+    state.pages.append(
+        PageText(page_num=3, text="Мишка и заяц вернулись домой.")
+    )
+    llm = fake_llm(
+        [
+            ScenesPayload(scenes=[_scene(1), _scene(3)]),
+            ScenesPayload(scenes=[_scene(2)]),
+        ]
+    )
+    stage = SceneBreakdownStage(llm)
+
+    await stage.run(state)
+
+    assert [scene.page_num for scene in state.scenes] == [1, 2, 3]
