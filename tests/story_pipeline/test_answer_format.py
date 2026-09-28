@@ -240,6 +240,24 @@ async def test_screenwriter_prompt_constrains_answer_shape(fake_llm) -> None:
     _assert_strict_format(llm.calls[0]["user"], PagesPayload)
 
 
+async def test_screenwriter_repair_prompt_keeps_answer_shape(fake_llm) -> None:
+    """Ремонт числа страниц не теряет форму ответа.
+
+    Ремонтный промпт вставляет в себя базовый запрос, поэтому инструкция
+    приходит вместе с ним. Проверяется именно это: без проверки ремонт стал
+    бы единственным путём, где модель снова видит сырую схему без формы.
+    """
+
+    llm = fake_llm(
+        [PagesPayload(pages=_pages([1])), PagesPayload(pages=_pages([1, 2]))]
+    )
+
+    await ScreenwriterStage(llm).run(_state())
+
+    assert llm.call_count == 2
+    _assert_strict_format(llm.calls[1]["user"], PagesPayload)
+
+
 async def test_extractor_prompt_constrains_answer_shape(fake_llm) -> None:
     """Экстрактор сущностей получает форму ответа `ExtractedEntities`."""
 

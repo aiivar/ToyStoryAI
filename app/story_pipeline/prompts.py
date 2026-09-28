@@ -1,6 +1,6 @@
 """Централизованные промпты пайплайна сказок.
 
-Здесь живут все обращения к языковой модели — и целиком, и по кучкам: шаблоны
+Здесь живут все обращения к языковой модели — и целиком, и по кускам: шаблоны
 этапов, корректирующий промпт LLM-клиента, формулировки проблем, которые
 валидаторы подставляют в перезапросы. Промпты не размещаются в модулях
 этапов или ином коде: правка формулировки локализуется в этом файле.
@@ -72,7 +72,7 @@ ANSWER_FORMAT = (
 )
 
 
-def _skeleton_value(annotation: Any, field_name: str) -> Any:
+def _skeleton_value(annotation: Any) -> Any:
     """Собрать значение-заготовку одного поля по его аннотации.
 
     Заготовка должна быть валидна самой моделью: иначе пример в промпте врал бы
@@ -88,7 +88,7 @@ def _skeleton_value(annotation: Any, field_name: str) -> Any:
     if origin is Union or origin is types.UnionType:
         non_none = [arg for arg in args if arg is not type(None)]
         if non_none:
-            return _skeleton_value(non_none[0], field_name)
+            return _skeleton_value(non_none[0])
         return None
     if origin is Literal:
         return args[0] if args else None
@@ -96,7 +96,7 @@ def _skeleton_value(annotation: Any, field_name: str) -> Any:
         # Список ответа показываем одним элементом: пустой список модель
         # принимает за «содержимое отсутствует» и возвращает его дословно.
         item = args[0] if args else str
-        return [_skeleton_value(item, field_name)]
+        return [_skeleton_value(item)]
     if origin is dict:
         return {}
     if isinstance(annotation, type) and issubclass(annotation, BaseModel):
@@ -134,7 +134,7 @@ def _skeleton_object(model: type[BaseModel]) -> dict[str, Any]:
         if field.annotation is int:
             skeleton[name] = _min_allowed_int(field)
         else:
-            skeleton[name] = _skeleton_value(field.annotation, name)
+            skeleton[name] = _skeleton_value(field.annotation)
     return skeleton
 
 
@@ -157,6 +157,7 @@ def render_answer_format(model: type[BaseModel]) -> str:
         label=ANSWER_EXAMPLE_LABEL,
         example=example,
     )
+
 
 # --- Этап планирования -------------------------------------------------
 
@@ -183,8 +184,7 @@ PLANNER_USER = (
     "- character_arc — что герой понимает и как меняется к концу;\n"
     "- narrative_arc — четыре бита (завязка, нарастание, кульминация, "
     "развязка), пригодные для детской сказки для ребёнка {age} лет.\n\n"
-    "Верни ответ строго по JSON-схеме:\n{schema}"
-    "\n{answer_format}"
+    "Верни ответ строго по JSON-схеме:\n{schema}\n{answer_format}"
 )
 
 # --- Этап сценариста ---------------------------------------------------
@@ -209,8 +209,7 @@ SCREENWRITER_USER = (
     "На каждой странице 2–3 предложения с сенсорными деталями — что герой "
     "видит, слышит и чувствует. Используй лексику, доступную ребёнку "
     "{age} лет. Каждая страница должна быть иллюстрируема.\n\n"
-    "Верни ответ строго по JSON-схеме:\n{schema}"
-    "\n{answer_format}"
+    "Верни ответ строго по JSON-схеме:\n{schema}\n{answer_format}"
 )
 
 # Плейсхолдеры: problems, base_user, num_pages.
@@ -251,8 +250,7 @@ EXTRACTOR_USER = (
     "- в реестр попадают только сущности, значимые для иллюстраций;\n"
     "- имена сущностей — короткие и однозначные: на них будут ссылаться "
     "сцены.\n\n"
-    "Верни ответ строго по JSON-схеме:\n{schema}"
-    "\n{answer_format}"
+    "Верни ответ строго по JSON-схеме:\n{schema}\n{answer_format}"
 )
 
 # --- Этап раскадровки --------------------------------------------------
@@ -280,8 +278,7 @@ SCENE_USER = (
     "characters_in_scene;\n"
     "- если ключевых объектов в кадре нет, верни пустой список "
     "objects_in_scene.\n\n"
-    "Верни ответ строго по JSON-схеме:\n{schema}"
-    "\n{answer_format}"
+    "Верни ответ строго по JSON-схеме:\n{schema}\n{answer_format}"
 )
 
 # Плейсхолдеры: entities (реестр допустимых имён),
@@ -298,8 +295,7 @@ SCENE_REPAIR_USER = (
     "objects_in_scene), заменив неверные имена на точные имена из реестра. "
     "Сохрани page_num и scene_description без изменений: композиция кадра "
     "должна остаться прежней.\n\n"
-    "Верни ответ строго по JSON-схеме:\n{schema}"
-    "\n{answer_format}"
+    "Верни ответ строго по JSON-схеме:\n{schema}\n{answer_format}"
 )
 
 # Плейсхолдеры: problems (список проблем покрытия), problem_pages (текст
@@ -317,8 +313,7 @@ SCENE_COVERAGE_REPAIR_USER = (
     "страниц построй новую сцену по тексту страницы, а для лишних номеров "
     "не возвращай сцену вовсе. Ссылки (characters_in_scene, location, "
     "objects_in_scene) используй только из реестра сущностей.\n\n"
-    "Верни ответ строго по JSON-схеме:\n{schema}"
-    "\n{answer_format}"
+    "Верни ответ строго по JSON-схеме:\n{schema}\n{answer_format}"
 )
 
 
@@ -426,8 +421,7 @@ JUDGE_USER = (
     "problem_pages номерами страниц, к которым относится проблема. Если "
     "нарушений нет, верни passed=true и пустой список problem_pages. "
     "Список issues — короткие формулировки найденных проблем на русском.\n\n"
-    "Верни ответ строго по JSON-схеме:\n{schema}"
-    "\n{answer_format}"
+    "Верни ответ строго по JSON-схеме:\n{schema}\n{answer_format}"
 )
 
 
@@ -456,8 +450,7 @@ REVISER_USER = (
     "текст и соответствующую ему сцену: если меняется текст, сцена "
     "обязательно пересобирается под новое действие, а ссылки в сцене "
     "берутся только из реестра сущностей.\n\n"
-    "Верни ответ строго по JSON-схеме:\n{schema}"
-    "\n{answer_format}"
+    "Верни ответ строго по JSON-схеме:\n{schema}\n{answer_format}"
 )
 
 
