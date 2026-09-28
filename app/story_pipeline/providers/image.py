@@ -226,7 +226,14 @@ class RouterAIImageProvider:
         """Сгенерировать изображение, повторяя транзиентные сбои."""
 
         self._require_api_key()
-        aspect_ratio = self._resolve_aspect_ratio(aspect_ratio)
+        resolved_ratio = self._resolve_aspect_ratio(aspect_ratio)
+        # Тело собирается один раз на вызов: кодирование reference-картинок
+        # в base64 для фото до 10 МБ даёт до ≈13 МБ строки, и пересборка
+        # тела на каждом повторе означала бы лишние мегабайты и CPU именно
+        # в самом платном месте прогона.
+        payload = self._build_payload(
+            prompt, seed, reference_images, resolved_ratio
+        )
         async for attempt in AsyncRetrying(
             stop=stop_after_attempt(self._max_attempts),
             wait=self._retry_wait,
@@ -234,9 +241,7 @@ class RouterAIImageProvider:
             reraise=True,
         ):
             with attempt:
-                return await self._request_and_parse(
-                    prompt, seed, reference_images, aspect_ratio
-                )
+                return await self._request_and_parse(payload, seed)
 
         # Недостижимо: AsyncRetrying с reraise=True либо вернёт результат,
         # либо поднимет исключение последней попытки.
@@ -339,12 +344,14 @@ class RouterAIImageProvider:
         return references
 
     async def _request_and_parse(
-        self,
-        prompt: str,
-        seed: int | None,
-        reference_images: list[bytes] | None,
-        aspect_ratio: str | None,
+        self, payload: dict[str, Any], seed: int | None
     ) -> GeneratedImage:
+        """Отправить готовое тело и разобрать ответ.
+
+        Тело приходит уже собранным: попытка повтора не должна пересобирать
+        base64 reference-картинок заново.
+        """
+
         url = f"{self._settings.routerai_base_url.rstrip('/')}{_IMAGES_PATH}"
         headers = {
             "Authorization": f"Bearer {self._settings.routerai_api_key}",
@@ -354,9 +361,7 @@ class RouterAIImageProvider:
         try:
             response = await self._build_client().post(
                 url,
-                json=self._build_payload(
-                    prompt, seed, reference_images, aspect_ratio
-                ),
+                json=payload,
                 headers=headers,
             )
         except httpx.TransportError as exc:

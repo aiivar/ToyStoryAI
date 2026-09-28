@@ -23,6 +23,7 @@ from app.story_pipeline.errors import (
     PermanentImageGenerationError,
     TransientImageGenerationError,
 )
+from app.story_pipeline.providers import image as image_module
 from app.story_pipeline.providers.image import (
     GeneratedImage,
     RouterAIImageProvider,
@@ -382,6 +383,27 @@ async def test_client_is_lazy_and_aclose_keeps_injected_client() -> None:
     await http_client.aclose()
 
 
+@pytest.mark.parametrize("timeout", [120.0, 45.5])
+async def test_lazy_client_timeout_comes_from_settings(timeout: float) -> None:
+    """Лениво созданный клиент получает таймаут из настроек.
+
+    Проверяется ленивый путь: клиент строит сам провайдер, а не приходит
+    снаружи. Значение 120 с существенно — дефолт httpx равен 5 с, а живой
+    вызов картинки занимает около 4,4 с, поэтому «потерянный» `timeout=`
+    уронил бы каждый платный прогон с ReadTimeout. Оба значения в наборе
+    отличаются от дефолта httpx, поэтому проверка не проходит «сама».
+    """
+
+    provider = RouterAIImageProvider(_settings(routerai_timeout=timeout))
+    try:
+        # Сеть в тестах не используется: сборка клиента к провайдеру не
+        # обращается, поэтому ленивая сборка вызывается напрямую.
+        client = provider._build_client()
+        assert client.timeout == httpx.Timeout(timeout)
+    finally:
+        await provider.aclose()
+
+
 # --- Ретраи и пустой ключ ----------------------------------------------
 
 
@@ -405,6 +427,78 @@ async def test_transient_error_is_retried_then_succeeds() -> None:
 
     assert image.data == expected
     assert calls["count"] == 2
+
+
+async def test_retry_resends_the_same_payload() -> None:
+    """Повтор отправляет побайтово то же тело, что и первая попытка."""
+
+    captured: list[httpx.Request] = []
+    reference = WEBP_BYTES + b"reference-payload"
+    reference_uri = "data:image/webp;base64," + base64.b64encode(
+        reference
+    ).decode("ascii")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if len(captured) == 1:
+            return httpx.Response(503, json={"error": "unavailable"})
+        return httpx.Response(200, json=_routerai_response(PNG_BYTES))
+
+    provider, http_client = _make_routerai(handler)
+    try:
+        await provider.generate(
+            "промпт", seed=1001, reference_images=[reference]
+        )
+    finally:
+        await http_client.aclose()
+
+    assert len(captured) == 2
+    first, second = captured
+    assert first.content == second.content
+    body = json.loads(second.content.decode())
+    assert body["input_references"] == [
+        {"type": "image_url", "image_url": {"url": reference_uri}}
+    ]
+
+
+async def test_payload_is_built_once_for_all_attempts(monkeypatch) -> None:
+    """Тело собирается один раз, а не на каждой попытке повтора.
+
+    Кодирование reference-картинки в base64 для фото до 10 МБ даёт до
+    ≈13 МБ строки, поэтому пересборка тела на каждом повторе — это лишние
+    мегабайты и CPU в самом платном месте прогона. Считаем вызовы
+    `image_data_uri`, подменяя символ в модуле провайдера на обёртку с
+    исходным поведением: сам base64 по-прежнему считается библиотекой.
+    """
+
+    calls = {"encode": 0}
+    original_image_data_uri = image_module.image_data_uri
+
+    def counting_image_data_uri(data: bytes) -> str:
+        calls["encode"] += 1
+        return original_image_data_uri(data)
+
+    monkeypatch.setattr(
+        image_module, "image_data_uri", counting_image_data_uri
+    )
+    attempts = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            return httpx.Response(500, json={"error": "boom"})
+        return httpx.Response(200, json=_routerai_response(PNG_BYTES))
+
+    provider, http_client = _make_routerai(handler)
+    references = [WEBP_BYTES + b"one", PNG_BYTES + b"two"]
+    try:
+        await provider.generate("промпт", reference_images=references)
+    finally:
+        await http_client.aclose()
+
+    assert attempts["count"] == 2
+    # Два референса кодируются один раз на весь вызов, а не по разу на попытку.
+    assert calls["encode"] == 2
 
 
 async def test_transient_errors_exhaust_attempts() -> None:
@@ -560,7 +654,6 @@ async def test_cost_is_not_invented_when_provider_omits_it() -> None:
 
 
 # --- Разбор ответа -----------------------------------------------------
-
 
 
 @pytest.mark.parametrize(
