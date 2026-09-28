@@ -330,6 +330,13 @@ class StoryRunner:
                 "Квота пользователя {} израсходована, прогон не запускаю",
                 request.user_id,
             )
+            # Запись о прогоне закрываем сразу: иначе она навсегда осталась бы
+            # «в работе», хотя платной работы не было.
+            await self._record(
+                request,
+                status=GenerationStatus.FAILED,
+                error="квота израсходована, прогон не запускался",
+            )
             await send(
                 FREE_LIMIT_REACHED, [build_subscription_keyboard().as_markup()]
             )

@@ -463,6 +463,9 @@ async def test_used_story_blocks_generation_before_any_paid_work(
     assert keyboard_labels(bundle.bot.sent[0].attachments) == [
         ["Оформить подписку"]
     ]
+    # Запись о прогоне закрыта, а не осталась «в работе» навсегда.
+    assert bundle.repository.updates[-1]["status"] is GenerationStatus.FAILED
+    assert "квота" in str(bundle.repository.updates[-1]["error"])
 
 
 async def test_free_story_is_allowed_for_new_user(tmp_path: Path) -> None:
