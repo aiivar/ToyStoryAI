@@ -89,8 +89,13 @@ class GenerationRepository:
         tale_text: str | None = None,
         video_url: str | None = None,
         error: str | None = None,
+        pages_count: int | None = None,
+        output_dir: str | None = None,
     ) -> Generation | None:
         """Обновить статус и результат записи.
+
+        Значения, которые не переданы, остаются прежними: `None` означает
+        «нечего менять», а не «очистить колонку».
 
         Возвращает обновлённую запись или `None`, если её нет.
         """
@@ -107,6 +112,10 @@ class GenerationRepository:
                 generation.video_url = video_url
             if error is not None:
                 generation.error = error
+            if pages_count is not None:
+                generation.pages_count = pages_count
+            if output_dir is not None:
+                generation.output_dir = output_dir
 
             await session.commit()
             await session.refresh(generation)

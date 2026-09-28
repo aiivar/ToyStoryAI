@@ -358,6 +358,11 @@ class StoryRunner:
         # закончиться сообщением пользователю, а не тишиной после
         # «Запускаю сказку!».
         pipeline: StoryPipeline | None = None
+        # Каталог прогона известен сразу после сборки настроек: он нужен и
+        # записи о прогоне, и разбору сбоя, поэтому живёт вне `try`.
+        # Пустая строка означает «сборка настроек не прошла» — тогда запись
+        # закрывается без каталога, но не падает.
+        run_dir: str = ""
         try:
             run_settings = self._settings.model_copy(
                 update={
@@ -366,6 +371,7 @@ class StoryRunner:
                     )
                 }
             )
+            run_dir = run_settings.story_output_dir
             announced: set[str] = set()
 
             async def on_stage(stage_name: str) -> None:
@@ -390,7 +396,10 @@ class StoryRunner:
         except Exception as exc:  # noqa: BLE001 - обрыв фоновой задачи
             logger.error("Прогон сказки сорвался: {}", exc)
             await self._record(
-                request, status=GenerationStatus.FAILED, error=str(exc)
+                request,
+                status=GenerationStatus.FAILED,
+                error=str(exc),
+                output_dir=run_dir,
             )
             await send(GENERATION_FAILED, [build_restart_keyboard().as_markup()])
             return
@@ -398,15 +407,16 @@ class StoryRunner:
             await self._close_quietly(pipeline)
 
         if state.status == "ok":
-            await self._record(
+            await self._record_state(
                 request,
+                state,
+                output_dir=run_dir,
                 status=GenerationStatus.SUCCESS,
-                tale_text=join_pages_text(state.pages),
             )
             await self._deliver_pages(send, state)
             await send(STORY_READY)
         else:
-            await self._deliver_partial(request, send, state)
+            await self._deliver_partial(request, send, state, run_dir)
 
         logger.info(
             "Прогон {} завершён: страниц={} статус={} каталог={}",
@@ -434,6 +444,7 @@ class StoryRunner:
         request: RunRequest,
         send: SendFunc,
         state: StoryState,
+        run_dir: str,
     ) -> None:
         """Отдать частичный результат и один раз предложить начать заново.
 
@@ -453,10 +464,11 @@ class StoryRunner:
             numbers_text(missing),
             reason,
         )
-        await self._record(
+        await self._record_state(
             request,
+            state,
+            output_dir=run_dir,
             status=GenerationStatus.FAILED,
-            tale_text=join_pages_text(state.pages),
             error=reason,
         )
         await self._deliver_pages(send, state)
@@ -575,14 +587,53 @@ class StoryRunner:
         status: GenerationStatus,
         tale_text: str | None = None,
         error: str | None = None,
+        pages_count: int | None = None,
+        output_dir: str | None = None,
     ) -> None:
-        """Записать результат прогона в БД (статус, текст, ошибка)."""
+        """Записать результат прогона в БД.
+
+        Кроме статуса и ошибки пишется содержание книги: число страниц,
+        полный текст сказки и каталог прогона (D19). Каталог — поле для
+        диагностики, ссылку на него в чат не отдаём.
+        """
 
         await self._repository.update_result(
             request.tale_id,
             status=status,
             tale_text=tale_text,
             error=error,
+            pages_count=pages_count,
+            output_dir=output_dir,
+        )
+
+    async def _record_state(
+        self,
+        request: RunRequest,
+        state: StoryState,
+        *,
+        output_dir: str,
+        status: GenerationStatus,
+        error: str | None = None,
+    ) -> None:
+        """Записать прогон по состоянию пайплайна.
+
+        Отдельный метод, чтобы статус, текст, число страниц и каталог
+        прогона не расходились между ветками успеха и частичного
+        результата: они отличаются только статусом и причиной.
+
+        Каталог берётся не из `state.output_dir`, а из того значения,
+        которое раннер сам передал пайплайну: пайплайн лишь проставляет
+        `state.output_dir` из настроек, а если прогон упал до этого —
+        состояние может остаться без каталога, и в записи была бы дыра.
+        """
+
+        await self._record(
+            request,
+            status=status,
+            tale_text=join_pages_text(state.pages),
+            error=error,
+            pages_count=len(state.pages),
+            output_dir=output_dir,
         )
 
     async def _notify_interrupted(self, chat_id: int) -> None:

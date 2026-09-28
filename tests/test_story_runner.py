@@ -602,6 +602,84 @@ async def test_success_record_contains_full_text_and_success_status(
     assert update["tale_text"] == "Текст страницы 1. Текст страницы 2."
 
 
+# --- 6.4: содержимое записи о прогоне ----------------------------------------
+
+
+async def test_successful_run_records_pages_count_and_output_dir(
+    tmp_path: Path,
+) -> None:
+    """Успешный прогон пишет число страниц и каталог прогона (D19)."""
+
+    bundle = make_runner(
+        pipeline=RecordingPipeline(result=made_state(tmp_path, pages=3))
+    )
+
+    await bundle.runner.run(make_request(tale_id=8))
+
+    update = bundle.repository.updates[-1]
+    assert update["generation_id"] == 8
+    assert update["pages_count"] == 3
+    assert update["output_dir"] == update["output_dir"].strip()
+    assert update["output_dir"].startswith("output/1-")
+    # Каталог прогона — диагностика, ссылку на него в чат не отдаём.
+    texts = [text for text in bundle.bot.sent_texts if text]
+    assert not any(update["output_dir"] in text for text in texts)
+
+
+async def test_partial_run_records_pages_and_failed_status(
+    tmp_path: Path,
+) -> None:
+    """Частичный прогон: страницы и каталог записаны, статус FAILED."""
+
+    bundle = make_runner(
+        pipeline=RecordingPipeline(
+            result=made_state(
+                tmp_path,
+                pages=2,
+                illustrated=(1,),
+                status="needs_review",
+            )
+        )
+    )
+
+    await bundle.runner.run(make_request(tale_id=9))
+
+    update = bundle.repository.updates[-1]
+    assert update["status"] is GenerationStatus.FAILED
+    assert update["tale_text"] == "Текст страницы 1. Текст страницы 2."
+    assert update["pages_count"] == 2
+    assert str(update["output_dir"]).startswith("output/1-")
+
+
+async def test_recorded_dir_is_the_one_given_to_pipeline(
+    tmp_path: Path,
+) -> None:
+    """В записи тот же каталог, который раннер отдал пайплайну (D16)."""
+
+    bundle = make_runner(
+        pipeline=RecordingPipeline(result=made_state(tmp_path, pages=1))
+    )
+
+    await bundle.runner.run(make_request())
+
+    sent_dir = bundle.pipeline.calls[0].settings.story_output_dir
+    assert bundle.repository.updates[-1]["output_dir"] == sent_dir
+
+
+async def test_crashed_run_still_records_run_dir(tmp_path: Path) -> None:
+    """Обрыв после сборки настроек оставляет каталог прогона в записи."""
+
+    bundle = make_runner(
+        pipeline=RecordingPipeline(error=RuntimeError("провайдер упал"))
+    )
+
+    await bundle.runner.run(make_request())
+
+    update = bundle.repository.updates[-1]
+    assert update["status"] is GenerationStatus.FAILED
+    assert update["output_dir"] == bundle.pipeline.calls[0].settings.story_output_dir
+
+
 # --- 5.6: отказы --------------------------------------------------------------
 
 

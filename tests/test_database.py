@@ -296,6 +296,76 @@ def test_dead_quota_method_is_gone() -> None:
     assert hasattr(GenerationRepository, "has_completed_story")
 
 
+# --- Задача 6.4: содержимое записи -------------------------------------------
+
+
+async def test_update_result_stores_pages_count_and_output_dir(
+    repository: GenerationRepository,
+) -> None:
+    """Репозиторий сохраняет число страниц и каталог прогона."""
+
+    tale = await repository.create_tale(1414)
+
+    updated = await repository.update_result(
+        tale.id,
+        status=GenerationStatus.SUCCESS,
+        tale_text="Одна страница. Другая страница.",
+        pages_count=2,
+        output_dir="output/1414-20260101-000000-000000",
+    )
+
+    assert updated is not None
+    assert updated.pages_count == 2
+    assert updated.output_dir == "output/1414-20260101-000000-000000"
+    assert updated.tale_text == "Одна страница. Другая страница."
+
+
+async def test_partial_run_keeps_pages_but_not_quota(
+    repository: GenerationRepository,
+) -> None:
+    """Частичный прогон: страницы в записи есть, квота не израсходована."""
+
+    tale = await repository.create_tale(1515)
+
+    updated = await repository.update_result(
+        tale.id,
+        status=GenerationStatus.FAILED,
+        tale_text="Страница 1. Страница 2.",
+        pages_count=2,
+        output_dir="output/1515-20260101-000000-000000",
+        error="сервис не ответил",
+    )
+
+    assert updated is not None
+    assert updated.pages_count == 2
+    assert updated.status is GenerationStatus.FAILED
+    assert await repository.has_completed_story(1515) is False
+
+
+async def test_omitted_fields_keep_previous_values(
+    repository: GenerationRepository,
+) -> None:
+    """Непереданные поля не затирают уже записанные значения."""
+
+    tale = await repository.create_tale(1616)
+    await repository.update_result(
+        tale.id,
+        status=GenerationStatus.SUCCESS,
+        tale_text="текст",
+        pages_count=4,
+        output_dir="output/1616",
+    )
+
+    updated = await repository.update_result(
+        tale.id, status=GenerationStatus.SUCCESS, error=None
+    )
+
+    assert updated is not None
+    assert updated.pages_count == 4
+    assert updated.output_dir == "output/1616"
+    assert updated.tale_text == "текст"
+
+
 async def test_model_repr_mentions_identity() -> None:
     """Отладочное представление содержит ключевые поля."""
 
