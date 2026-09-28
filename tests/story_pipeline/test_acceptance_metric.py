@@ -49,17 +49,25 @@ def passed_first_try(state: StoryState) -> bool:
     return state.judge_history[0].passed
 
 
-def first_try_pass_rate(states: Sequence[StoryState]) -> float:
+def first_try_pass_rate(
+    states: Sequence[StoryState],
+    *,
+    failures: int = 0,
+) -> float:
     """Доля прогонов, прошедших судью с первой попытки (значение 0..1).
 
-    Пустая серия — ошибка вызова: доля от нуля прогонов не определена, и
-    молчаливый ноль исказил бы приёмку.
+    `failures` — число прогонов, упавших до вынесения вердикта (ненулевой
+    код возврата CLI). Они входят в знаменатель как не прошедшие: иначе
+    сломанная серия, где половина прогонов падает, показывала бы 100% и
+    ложно проходила приёмку. Ошибка вызова — только полностью пустая серия
+    (`states` пусто и `failures == 0`): доля от нуля прогонов не определена.
     """
 
-    if not states:
+    total = len(states) + failures
+    if total == 0:
         raise ValueError("Нельзя вычислить долю прохождения по пустой серии.")
     passed = sum(1 for state in states if passed_first_try(state))
-    return passed / len(states)
+    return passed / total
 
 
 def _state(
@@ -134,6 +142,31 @@ def test_first_try_pass_rate_reaches_threshold_at_seventy_percent() -> None:
     assert first_try_pass_rate(states) >= PASS_RATE_THRESHOLD
 
 
+def test_first_try_pass_rate_counts_crashes_as_non_passing() -> None:
+    """Сбойные прогоны входят в знаменатель и снижают долю, а не исчезают."""
+
+    states = [_state(verdicts=[True]), _state(verdicts=[True])]
+
+    assert first_try_pass_rate(states, failures=2) == 0.5
+
+
+def test_broken_series_cannot_report_full_pass_rate() -> None:
+    """Серия, где половина прогонов упала, не может показать 100%."""
+
+    states = [_state(verdicts=[True]) for _ in range(5)]
+
+    rate = first_try_pass_rate(states, failures=5)
+
+    assert rate == 0.5
+    assert rate < PASS_RATE_THRESHOLD
+
+
+def test_all_crashed_series_has_zero_rate() -> None:
+    """Если упали все прогоны, доля нулевая, а не неопределённая."""
+
+    assert first_try_pass_rate([], failures=5) == 0.0
+
+
 def test_first_try_pass_rate_rejects_empty_series() -> None:
     """Пустая серия не имеет доли — это ошибка вызова, не ноль."""
 
@@ -185,9 +218,10 @@ def measure_live_first_try_pass_rate(
 ) -> tuple[list[StoryState], int]:
     """Прогнать CLI `runs` раз и вернуть состояния и число сбоев.
 
-    Сбоем считается ненулевой код возврата: такое состояние в метрику не
+    Сбоем считается ненулевой код возврата: такое состояние в список не
     попадает (судья его не выносил), но число сбоев возвращается отдельно,
-    чтобы провал был виден в отчёте, а не растворялся в знаменателе.
+    чтобы вызывающий включил их в знаменатель метрики — упавший прогон
+    понижает долю, а не исчезает из неё.
     """
 
     output_root = Path(".tmp/tests") / f"story-acceptance-{uuid4().hex}"
@@ -214,19 +248,17 @@ def test_live_first_try_pass_rate_meets_threshold() -> None:
         )
 
     states, failures = measure_live_first_try_pass_rate(DEFAULT_RUNS)
-    assert states, (
-        f"Ни один прогон не завершился успешно (сбоев: {failures}): "
-        "нечего измерять."
-    )
     passed = sum(1 for state in states if passed_first_try(state))
-    rate = first_try_pass_rate(states)
+    # Сбои идут в знаменатель: сломанная серия понижает долю и не может
+    # показать 100% при половине упавших прогонов.
+    rate = first_try_pass_rate(states, failures=failures)
     print(
-        f"\nЖивая серия: прогонов {DEFAULT_RUNS}, "
-        f"успешных {len(states)}, сбоев {failures}, "
-        f"без ревизии {passed}, доля {rate:.0%}"
+        f"\nЖивая серия: сбоев {failures}, прогонов {DEFAULT_RUNS}, "
+        f"успешных {len(states)}, без ревизии {passed}, доля {rate:.0%}"
     )
 
     assert rate >= PASS_RATE_THRESHOLD, (
         f"Доля прохождения без ревизии {rate:.0%} ниже "
-        f"целевых {PASS_RATE_THRESHOLD:.0%}."
+        f"целевых {PASS_RATE_THRESHOLD:.0%} "
+        f"(сбоев {failures} из {DEFAULT_RUNS})."
     )
