@@ -17,8 +17,14 @@ from app.story_pipeline.models import (
 )
 from app.story_pipeline.prompts import ART_STYLE_DEFAULT
 from app.story_pipeline.stages.prompt_builder import (
+    CHARACTER_SHEET_PHOTO_REFERENCE,
     build_art_prompt,
     build_character_sheet_prompt,
+)
+
+# Описание игрушки-героя: тот же источник правды, что у экстрактора и судьи.
+TOY_DESCRIPTION = (
+    "Зайка: маленький серый кролик, мягкая игрушка, одно ухо в пятнах."
 )
 
 
@@ -202,6 +208,43 @@ def test_build_character_sheet_prompt_lists_characters_and_requirements() -> Non
     assert "full body" in prompt
     # Детерминирована: повторный вызов даёт ту же строку.
     assert build_character_sheet_prompt(entities) == prompt
+
+
+def test_build_character_sheet_prompt_carries_toy_and_reference() -> None:
+    """Лист получает описание игрушки и требование опереться на фото.
+
+    Лист генерируется с фотографией игрушки как единственным референсом (D5),
+    поэтому промпт обязан и описать облик, и явно потребовать следовать фото:
+    без этого модель рисует «просто плюшевого мишку» по описанию из реестра.
+    """
+
+    entities = _entities()
+
+    prompt = build_character_sheet_prompt(entities, toy_description=TOY_DESCRIPTION)
+
+    # Описание игрушки-героя доходит до листа дословно.
+    assert TOY_DESCRIPTION in prompt
+    # Требование следовать фотографии-референсу.
+    assert CHARACTER_SHEET_PHOTO_REFERENCE in prompt
+    # Детерминирована: повторный вызов даёт ту же строку.
+    assert (
+        build_character_sheet_prompt(entities, toy_description=TOY_DESCRIPTION)
+        == prompt
+    )
+
+
+def test_build_character_sheet_prompt_without_toy_is_unchanged() -> None:
+    """Без описания (CLI-сценарий) лист собирается как раньше, без мусора."""
+
+    entities = _entities()
+
+    prompt = build_character_sheet_prompt(entities)
+
+    assert TOY_DESCRIPTION not in prompt
+    assert CHARACTER_SHEET_PHOTO_REFERENCE not in prompt
+    assert prompt == build_character_sheet_prompt(entities, toy_description="  ")
+    assert ". ." not in prompt
+    assert not prompt.endswith(". ")
 
 
 def test_build_character_sheet_prompt_without_characters_is_clean() -> None:

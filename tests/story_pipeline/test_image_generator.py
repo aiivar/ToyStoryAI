@@ -36,9 +36,13 @@ from app.story_pipeline.stages.image_generator import (
     page_seed,
 )
 from app.story_pipeline.stages.prompt_builder import (
+    CHARACTER_SHEET_PHOTO_REFERENCE,
     build_art_prompt,
     build_character_sheet_prompt,
 )
+
+# Описание игрушки-героя: единый источник правды для всех потребителей.
+TOY_DESCRIPTION = "Зайка: маленький серый кролик, одно ухо в пятнах."
 
 
 def _entities() -> ExtractedEntities:
@@ -158,6 +162,30 @@ async def test_photo_reference_builds_sheet_and_sheet_builds_pages(
     assert sheet_call["reference_images"] == [photo]
     for call in page_calls:
         assert call["reference_images"] == [b"image-0"]
+
+
+async def test_toy_description_reaches_sheet_prompt(
+    tmp_path: Path,
+    fake_image_provider,
+) -> None:
+    """Описание игрушки из состояния попадает в промпт листа, но не в страницы.
+
+    Промпт листа собирается этапом, а не вызывающим кодом бота: иначе
+    описание дошло бы до экстрактора и судьи, но потерялось бы ровно там,
+    где рисуется образ ребёнка.
+    """
+
+    provider = fake_image_provider()
+    state = _state(tmp_path)
+    state.toy_description = TOY_DESCRIPTION
+
+    await ImageGeneratorStage(provider).run(state)
+
+    sheet_prompt = provider.calls[0]["prompt"]
+    assert TOY_DESCRIPTION in sheet_prompt
+    assert CHARACTER_SHEET_PHOTO_REFERENCE in sheet_prompt
+    # Страницы опираются на лист, а не на сырое описание.
+    assert TOY_DESCRIPTION not in provider.calls[1]["prompt"]
 
 
 async def test_aspect_ratios_differ_between_sheet_and_pages(

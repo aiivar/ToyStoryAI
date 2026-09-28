@@ -170,7 +170,9 @@ class ImageGeneratorStage:
         # Фото игрушки — единственный референс листа; без фото лист строится
         # только по описанию (CLI-сценарий). Страницы ниже получают лист.
         sheet = await self._provider.generate(
-            build_character_sheet_prompt(entities),
+            build_character_sheet_prompt(
+                entities, toy_description=state.toy_description
+            ),
             seed=CHARACTER_SHEET_SEED,
             reference_images=(
                 [self._reference_photo]

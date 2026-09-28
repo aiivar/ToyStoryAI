@@ -44,6 +44,14 @@ CHARACTER_SHEET_CHARACTER_SEPARATOR = "; "
 # Завершающая фраза листа: он задаёт согласованный дизайн для всех страниц.
 CHARACTER_SHEET_TAIL = "Consistent character design for all pages of the book."
 
+# Требование следовать фотографии-референсу. Лист генерируется с фото
+# игрушки как единственным reference (D5), поэтому промпт говорит об этом
+# прямо: иначе модель рисует «просто плюшевого мишку» по описанию из
+# реестра, и фото перестаёт быть источником правды.
+CHARACTER_SHEET_PHOTO_REFERENCE = (
+    "Match the character to the provided reference photo of the toy"
+)
+
 
 def _join_segments(segments: tuple[str, ...]) -> str:
     """Соединить непустые сегменты разделителем, отбросив пустые.
@@ -145,12 +153,36 @@ def build_art_prompt(scene: PageScene, entities: ExtractedEntities) -> str:
     )
 
 
-def build_character_sheet_prompt(entities: ExtractedEntities) -> str:
+def _toy_reference_segment(toy_description: str | None) -> str:
+    """Собрать блок «описание игрушки + требование следовать фото».
+
+    Обе части уходят в промпт только вместе: описание без требования модель
+    легко трактует как пожелание, а требование без описания — как пустое
+    указание. Пустое или пробельное описание (CLI-сценарий без фото) убирает
+    обе части, чтобы лист не требовал несуществующего reference.
+    """
+
+    cleaned = (toy_description or "").strip()
+    if not cleaned:
+        return ""
+    return f"{cleaned}. {CHARACTER_SHEET_PHOTO_REFERENCE}"
+
+
+def build_character_sheet_prompt(
+    entities: ExtractedEntities,
+    toy_description: str | None = None,
+) -> str:
     """Собрать промпт reference-листа персонажей (character sheet).
 
     Лист генерируется один раз до страниц и передаётся им как reference.
     Перечисляет всех персонажей реестра с дословным `full_desc`, требует
     нейтральный фон и полный рост и использует единый стиль сказки.
+
+    `toy_description` — описание внешности игрушки по фото родителя: тот же
+    источник правды, что у экстрактора и судьи. При его наличии лист
+    получает требение следовать фотографии, при отсутствии (CLI-сценарий)
+    промпт собирается ровно как раньше.
+
     Чистая детерминированная функция: без LLM и ввода-вывода.
     """
 
@@ -163,6 +195,7 @@ def build_character_sheet_prompt(entities: ExtractedEntities) -> str:
             _resolve_art_style(entities),
             CHARACTER_SHEET_HEADER,
             characters,
+            _toy_reference_segment(toy_description),
             CHARACTER_SHEET_BACKGROUND,
             CHARACTER_SHEET_TAIL,
         )
@@ -173,6 +206,7 @@ __all__ = [
     "CHARACTER_SHEET_BACKGROUND",
     "CHARACTER_SHEET_CHARACTER_SEPARATOR",
     "CHARACTER_SHEET_HEADER",
+    "CHARACTER_SHEET_PHOTO_REFERENCE",
     "CHARACTER_SHEET_TAIL",
     "CONSISTENCY_TAIL",
     "SEGMENT_SEPARATOR",
