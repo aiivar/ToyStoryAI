@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Protocol, TypeVar, cast
 
 import httpx
@@ -21,6 +20,7 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
+from tenacity.wait import WaitBaseT
 
 from app.story_pipeline.errors import (
     PermanentLLMError,
@@ -29,17 +29,15 @@ from app.story_pipeline.errors import (
 )
 from app.story_pipeline.prompts import SCHEMA_CORRECTION_USER
 from app.story_pipeline.settings import StorySettings
+from app.utils.chat_completions import (
+    PERMANENT_STATUS_CODES,
+    StatusCategory,
+    classify_status,
+    parse_json_object,
+)
 
 # Тип ответа LLM: конкретная pydantic-модель этапа.
 T = TypeVar("T", bound=BaseModel)
-
-# Возможная markdown-обёртка вокруг JSON: ```json … ``` или ``` … ```.
-_CODE_FENCE_RE = re.compile(
-    r"^```[a-zA-Z0-9_-]*\s*(?P<body>.*?)\s*```$", re.DOTALL
-)
-
-# HTTP-статусы, при которых повтор бессмыслен: аутентификация и валидация.
-_PERMANENT_STATUS_CODES = frozenset({400, 401, 403, 404, 422})
 
 
 class Usage(BaseModel):
@@ -100,13 +98,13 @@ class DeepSeekLLMClient:
         client: httpx.AsyncClient | None = None,
         *,
         max_attempts: int = 3,
-        retry_wait: Any | None = None,
+        retry_wait: WaitBaseT | None = None,
     ) -> None:
         self._settings = settings
         self._client = client
         self._owns_client = client is None
         self._max_attempts = max_attempts
-        self._retry_wait = (
+        self._retry_wait: WaitBaseT = (
             retry_wait
             if retry_wait is not None
             else wait_exponential(multiplier=0.5, min=0.5, max=8)
@@ -254,13 +252,13 @@ class DeepSeekLLMClient:
                 f"Сетевая ошибка при обращении к DeepSeek: {exc}"
             ) from exc
 
-        if response.status_code in _PERMANENT_STATUS_CODES:
+        if response.status_code in PERMANENT_STATUS_CODES:
             raise PermanentLLMError(
                 "DeepSeek отклонил запрос "
                 f"(HTTP {response.status_code}): {response.text[:300]}"
             )
 
-        if response.status_code == 429 or response.status_code >= 500:
+        if classify_status(response.status_code) is StatusCategory.TRANSIENT:
             raise TransientLLMError(
                 "DeepSeek временно недоступен "
                 f"(HTTP {response.status_code}): {response.text[:300]}"
@@ -278,21 +276,12 @@ class DeepSeekLLMClient:
                 "DeepSeek вернул ответ, который не удалось разобрать."
             ) from exc
 
-    @staticmethod
-    def _strip_code_fence(content: str) -> str:
-        """Снять markdown-обёртку блока кода и вернуть полезную нагрузку."""
-
-        match = _CODE_FENCE_RE.match(content.strip())
-        if match is None:
-            return content.strip()
-        return match.group("body").strip()
-
     @classmethod
     def _parse(cls, schema: type[T], content: str) -> T:
         """Разобрать JSON-текст в модель, поднимая ошибку схемы при сбое."""
 
         try:
-            payload = json.loads(cls._strip_code_fence(content))
+            payload = parse_json_object(content)
         except json.JSONDecodeError as exc:
             raise SchemaValidationError(
                 f"LLM вернул не-JSON ответ: {exc}"
