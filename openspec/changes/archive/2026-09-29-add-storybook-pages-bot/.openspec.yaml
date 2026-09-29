@@ -1,0 +1,7 @@
+schema: spec-driven
+created: 2026-09-28
+# Видео и прежняя одностраничная сказка выведены из продукта: capability
+# `toy-animation` (видеопровайдер) и `tale-generation` (TextGenerator на
+# 150–300 слов) удалены из кода вместе с их требованиями, поэтому их
+# main-спеки должны быть удалены, а не остаться пустыми.
+retire_capabilities: true
