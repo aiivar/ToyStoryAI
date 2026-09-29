@@ -34,9 +34,10 @@ STAGE_NAMES = (
     ImageGeneratorStage.name,
 )
 
-# Разница между числом страниц по умолчанию и листом персонажей: столько
-# генераций изображений стоит одна сказка.
-IMAGES_PER_STORY = StorySettings.model_fields["story_default_pages"].default + 1
+# Стоимость одной сказки: лист персонажей плюс столько картинок, сколько
+# разрешает бюджет иллюстраций. Раньше бюджета не было, и число картинок
+# равнялось числу страниц; теперь они независимы, поэтому берём бюджет.
+IMAGES_PER_STORY = StorySettings.model_fields["story_illustrated_pages"].default + 1
 
 
 def _readme() -> str:
