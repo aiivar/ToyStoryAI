@@ -178,3 +178,50 @@ def test_scene_coverage_prompt_is_centralized() -> None:
     assert "{problem_pages}" in template
     assert "{problem_context}" in template
     assert "ровно одна сцена" in template
+
+
+# --- Требование иллюстрируемости переносится на набор страниц (D5) -------
+
+
+def test_illustrated_pages_plan_lives_in_prompts_module() -> None:
+    """Блок про набор иллюстрируемых страниц — константа `prompts.py`.
+
+    Проверяется тем же инвариантом централизации, что и остальные промпты:
+    формулировка про визуальные вершины и связки не должна расходиться между
+    шаблоном и местом подстановки.
+    """
+
+    assert "{pages}" in prompts.ILLUSTRATED_PAGES_PLAN
+    assert "связк" in prompts.ILLUSTRATED_PAGES_PLAN
+    assert "{illustration_plan}" in prompts.SCREENWRITER_USER
+    # Прежнее требование вынесено из общего шаблона в отдельную константу:
+    # при ограниченном наборе оно было бы прямой ложью.
+    assert prompts.ALL_PAGES_ILLUSTRATABLE not in prompts.SCREENWRITER_USER
+
+
+def test_illustration_plan_names_only_limited_set() -> None:
+    """Ограниченный набор — номера и требование связок вместо «каждой»."""
+
+    plan = prompts.format_illustration_plan([1, 4, 6], 6)
+
+    assert "1, 4, 6" in plan
+    assert "связк" in plan
+    assert prompts.ALL_PAGES_ILLUSTRATABLE not in plan
+
+
+def test_illustration_plan_keeps_all_pages_wording_on_full_set() -> None:
+    """Полный набор — нынешняя формулировка, без перечисления номеров."""
+
+    plan = prompts.format_illustration_plan([1, 2, 3, 4, 5, 6], 6)
+
+    assert plan == prompts.ALL_PAGES_ILLUSTRATABLE
+    assert "связк" not in plan
+
+
+def test_illustration_plan_treats_unset_field_as_full_set() -> None:
+    """Пустой набор — «не задан», то есть иллюстрируются все страницы."""
+
+    assert (
+        prompts.format_illustration_plan([], 3)
+        == prompts.ALL_PAGES_ILLUSTRATABLE
+    )

@@ -27,6 +27,10 @@ from datetime import datetime, timezone
 from loguru import logger
 
 from app.story_pipeline.errors import StoryPipelineError
+from app.story_pipeline.illustrations import (
+    illustrated_page_nums,
+    normalize_page_nums,
+)
 from app.story_pipeline.models import Stage, StoryState
 from app.story_pipeline.observability import log_stage, total_usage
 from app.story_pipeline.providers.image import ImageProvider
@@ -125,6 +129,14 @@ class StoryPipeline:
         # иначе параллельные прогоны писали бы файлы в одно место.
         if state.output_dir is None:
             state.output_dir = self._settings.story_output_dir
+        # Набор иллюстрируемых страниц материализуется здесь и больше не
+        # меняется: от него зависят промпт сценариста, вызовы провайдера и
+        # проверка покрытия, и расхождение между этими тремя выглядело бы
+        # как «картинки не те». Явно заданное поле — точка per-run
+        # переопределения, но нормализуется оно тем же правилом: опечатка
+        # вызывающей стороны обязана исправляться здесь, а не ронять
+        # прогон позже и непонятно где.
+        self._resolve_illustrated_pages(state)
         current_stage = "?"
         try:
             for stage in self._stages:
@@ -169,6 +181,49 @@ class StoryPipeline:
                     first_error = exc
         if first_error is not None:
             raise first_error
+
+    def _resolve_illustrated_pages(self, state: StoryState) -> None:
+        """Заполнить набор иллюстрируемых страниц, если его ещё нет.
+
+        Пустое поле состояния означает «набор не задан»: набор вычисляется
+        из бюджета настроек и числа страниц. Явно заданный набор
+        сохраняется, но всё равно нормализуется — вычисленный набор
+        корректен по построению, поэтому ошибаться может только тот, кто
+        задал его руками.
+
+        Логируется исходное значение, если оно было задано и не совпало с
+        нормализованным: иначе прогон молча исправил бы чужие данные, и
+        разбор потом не увидел бы, что было не так.
+        """
+
+        requested = list(state.illustrated_pages)
+        source = (
+            "настройки"
+            if not requested
+            else f"вызывающая сторона {requested}"
+        )
+        normalized = normalize_page_nums(
+            requested
+            if requested
+            else illustrated_page_nums(
+                state.num_pages,
+                self._settings.story_illustrated_pages,
+            ),
+            state.num_pages,
+        )
+        if requested and list(normalized) != requested:
+            logger.warning(
+                "pipeline: набор иллюстрируемых страниц нормализован "
+                "{} -> {}",
+                requested,
+                list(normalized),
+            )
+        state.illustrated_pages = list(normalized)
+        logger.debug(
+            "pipeline: иллюстрируемые страницы из {}: {}",
+            source,
+            list(normalized),
+        )
 
     async def _notify_stage(self, stage_name: str) -> None:
         """Сообщить о начале этапа, если колбэк передан, и не дать сбою

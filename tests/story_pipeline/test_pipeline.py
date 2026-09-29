@@ -163,7 +163,9 @@ async def test_run_fills_state_end_to_end(
     assert state.entities is not None
     assert [scene.page_num for scene in state.scenes] == [1, 2]
     # Иллюстрации: лист персонажей + страницы в каталоге прогона.
-    assert len(state.art_prompts) == 2
+    # Промпты хранятся парами «номер страницы — промпт», поэтому принадлежность
+    # промпта читается напрямую, а не по порядку элементов списка.
+    assert [number for number, _ in state.art_prompts] == [1, 2]
     assert state.character_sheet_path == str(tmp_path / "character_sheet.png")
     assert [art.page_num for art in state.images] == [1, 2]
     assert (tmp_path / "page_1.png").exists()
@@ -179,6 +181,65 @@ async def test_run_fills_state_end_to_end(
     # Один вызов на каждый LLM-этап без ревизий: план, сказка, извлечение,
     # раскадровка, судья.
     assert llm.call_count == 5
+
+
+async def test_run_materializes_illustrated_pages_from_settings(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Пустое поле набора заполняется бюджетом настроек и нормализуется.
+
+    Материализация происходит один раз в начале `run()`: от набора зависят
+    промпт сценариста, вызовы провайдера и проверка покрытия, поэтому он
+    должен быть известен до первого этапа.
+    """
+
+    provider = fake_image_provider()
+    pipeline = StoryPipeline(
+        fake_llm(_ok_responses()),
+        provider,
+        story_settings(
+            story_output_dir=str(tmp_path),
+            story_illustrated_pages=1,
+        ),
+    )
+    state = _state(num_pages=2)
+    assert state.illustrated_pages == []
+
+    await pipeline.run(state)
+
+    # При двух страницах и бюджете 1 набор — только первая страница, и он
+    # материализован в состоянии, а не вычисляется каждым потребителем.
+    assert state.illustrated_pages == [1]
+
+
+async def test_run_keeps_explicit_illustrated_pages_but_normalizes_them(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Явно заданный набор не перетирается, но приводится к корректному виду.
+
+    Per-run переопределение — точка настройки без правки `.env`, поэтому его
+    вычислить заново нельзя. Нормализация при этом обязательна: опечатка
+    вызывающей стороны обязана исправляться здесь, а не ронять прогон позже.
+    """
+
+    pipeline = StoryPipeline(
+        fake_llm(_ok_responses()),
+        fake_image_provider(),
+        story_settings(story_output_dir=str(tmp_path)),
+    )
+    state = _state(num_pages=2)
+    # Повтор и номер вне диапазона: остаётся единственная корректная страница.
+    state.illustrated_pages = [2, 2, 99]
+
+    await pipeline.run(state)
+
+    assert state.illustrated_pages == [2]
 
 
 async def test_pipeline_passes_reference_photo_without_storing_it(

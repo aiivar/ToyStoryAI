@@ -43,7 +43,7 @@ def _brief() -> StoryBrief:
     )
 
 
-def _state(num_pages: int = 6) -> StoryState:
+def _state(num_pages: int = 6, illustrated: list[int] | None = None) -> StoryState:
     """Собрать состояние с готовым брифом для этапа сценариста."""
 
     return StoryState(
@@ -51,6 +51,7 @@ def _state(num_pages: int = 6) -> StoryState:
         age=6,
         moral="Смелость помогает найти друзей",
         num_pages=num_pages,
+        illustrated_pages=illustrated or [],
         brief=_brief(),
         started_at=datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc),
     )
@@ -106,10 +107,90 @@ async def test_screenwriter_prompt_binds_pages_to_arc(fake_llm) -> None:
     # Требования к содержанию страниц.
     assert "2–3 предложения" in user
     assert "сенсорн" in user
+    # Пустое поле набора = «иллюстрируются все страницы», поэтому в промпте
+    # остаётся требование иллюстрируемости каждой страницы.
     assert "иллюстрируем" in user
     assert "доступную ребёнку 6 лет" in user
     # Схема из модели, а не руками.
     assert "$defs" in user
+
+
+# --- Набор иллюстрируемых страниц в промпте (D5) -------------------------
+
+
+async def test_prompt_names_illustrated_pages_and_calls_others_transitions(
+    fake_llm,
+) -> None:
+    """Ограниченный набор: номера названы, остальные страницы — связки.
+
+    Требование иллюстрируемости переносится с «каждой страницы» на
+    конкретные номера: визуальные вершины должны совпасть с нарисованными
+    страницами, иначе книжка рисуется не там, где драма.
+    """
+
+    llm = fake_llm([_pages([1, 2, 3, 4, 5, 6])])
+
+    await ScreenwriterStage(llm).run(_state(6, illustrated=[1, 4, 6]))
+
+    user = llm.calls[0]["user"]
+    assert "1, 4, 6" in user
+    assert "связк" in user
+    # Прежняя формулировка при ограниченном наборе стала бы ложью: модель
+    # старалась бы сделать визуальной каждую из шести страниц.
+    assert "Каждая страница должна быть иллюстрируема" not in user
+
+
+async def test_prompt_keeps_all_pages_illustratable_on_full_set(fake_llm) -> None:
+    """При полном наборе остаётся нынешнее требование ко всем страницам."""
+
+    llm = fake_llm([_pages([1, 2, 3, 4, 5, 6])])
+
+    await ScreenwriterStage(llm).run(_state(6, illustrated=[1, 2, 3, 4, 5, 6]))
+
+    user = llm.calls[0]["user"]
+    assert "Каждая страница должна быть иллюстрируема" in user
+    # Перечисления номеров при полном наборе не нужно: оно только шумит.
+    assert "связк" not in user
+
+
+async def test_prompt_without_set_in_state_asks_for_all_pages(fake_llm) -> None:
+    """Пустое поле — «набор не задан», то есть иллюстрируются все страницы."""
+
+    llm = fake_llm([_pages([1, 2, 3, 4, 5, 6])])
+    state = _state(6)
+    assert state.illustrated_pages == []
+
+    await ScreenwriterStage(llm).run(state)
+
+    assert "Каждая страница должна быть иллюстрируема" in llm.calls[0]["user"]
+
+
+async def test_repair_request_carries_the_same_illustrated_set(fake_llm) -> None:
+    """Починочный запрос собран из `base_user`, поэтому набор в нём есть.
+
+    Иначе исправленный текст потерял бы требование к визуальной сцене: набор
+    в первой попытке — единственное место, где модель о нём узнаёт.
+    """
+
+    llm = fake_llm([_pages([1, 2, 3]), _pages([1, 2, 3, 4, 5, 6])])
+
+    await ScreenwriterStage(llm).run(_state(6, illustrated=[1, 4, 6]))
+
+    assert llm.call_count == 2
+    repair_user = llm.calls[1]["user"]
+    assert "1, 4, 6" in repair_user
+    assert "связк" in repair_user
+    assert "Каждая страница должна быть иллюстрируема" not in repair_user
+
+
+async def test_repair_request_keeps_full_set_wording(fake_llm) -> None:
+    """При полном наборе починочный запрос говорит то же, что и исходный."""
+
+    llm = fake_llm([_pages([1, 2, 3]), _pages([1, 2, 3, 4, 5, 6])])
+
+    await ScreenwriterStage(llm).run(_state(6, illustrated=[1, 2, 3, 4, 5, 6]))
+
+    assert "Каждая страница должна быть иллюстрируема" in llm.calls[1]["user"]
 
 
 # --- Чистая функция validate_page_count ---------------------------------

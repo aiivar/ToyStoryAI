@@ -27,6 +27,7 @@ _STORY_ENV_VARS = (
     "STORY_DEFAULT_PAGES",
     "STORY_PAGES_MIN",
     "STORY_PAGES_MAX",
+    "STORY_ILLUSTRATED_PAGES",
     "STORY_MAX_REVISIONS",
     "STORY_AGE_MIN",
     "STORY_AGE_MAX",
@@ -64,6 +65,7 @@ def test_defaults_without_max_bot_token(monkeypatch) -> None:
     assert config.story_default_pages == 6
     assert config.story_pages_min == 1
     assert config.story_pages_max == 12
+    assert config.story_illustrated_pages == 3
     assert config.story_max_revisions == 2
     assert config.story_age_min == 3
     assert config.story_age_max == 6
@@ -79,6 +81,7 @@ def test_environment_overrides_defaults(monkeypatch) -> None:
     monkeypatch.setenv("ROUTERAI_IMAGE_MODEL", "google/gemini-3.1-flash-image")
     monkeypatch.setenv("STORY_IMAGE_ASPECT_RATIO", "3:2")
     monkeypatch.setenv("STORY_DEFAULT_PAGES", "8")
+    monkeypatch.setenv("STORY_ILLUSTRATED_PAGES", "0")
     monkeypatch.setenv("STORY_AGE_MAX", "8")
     monkeypatch.setenv("STORY_OUTPUT_DIR", "runs")
 
@@ -89,6 +92,7 @@ def test_environment_overrides_defaults(monkeypatch) -> None:
     assert config.routerai_image_model == "google/gemini-3.1-flash-image"
     assert config.story_image_aspect_ratio == "3:2"
     assert config.story_default_pages == 8
+    assert config.story_illustrated_pages == 0
     assert config.story_age_max == 8
     assert config.story_output_dir == "runs"
 
@@ -142,6 +146,34 @@ def test_empty_aspect_ratio_means_provider_default() -> None:
     )
 
     assert config.story_image_aspect_ratio == ""
+
+
+def test_negative_illustration_budget_is_rejected() -> None:
+    """Отрицательный бюджет иллюстраций — опечатка, а не «рисовать всё».
+
+    Без проверки формула набора для `K = -1` дала бы пустой цикл и пустой
+    набор, то есть требование «набор непуст» нарушило бы само себя и
+    поймало бы только аварийный сбой. Ловим опечатку здесь, до первого
+    платного вызова, — тем же способом, каким отсекается неверное
+    соотношение сторон.
+    """
+
+    with pytest.raises(ValidationError) as failure:
+        StorySettings(  # type: ignore[call-arg]
+            _env_file=None, story_illustrated_pages=-1
+        )
+
+    assert "story_illustrated_pages" in str(failure.value)
+
+
+def test_zero_illustration_budget_is_allowed() -> None:
+    """Нулевой бюджет допустим: это явное «иллюстрировать все страницы»."""
+
+    config = StorySettings(  # type: ignore[call-arg]
+        _env_file=None, story_illustrated_pages=0
+    )
+
+    assert config.story_illustrated_pages == 0
 
 
 def test_settings_survive_example_env_file(monkeypatch, tmp_path) -> None:

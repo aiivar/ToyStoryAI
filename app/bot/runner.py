@@ -44,6 +44,7 @@ from app.db.models import GenerationStatus
 from app.db.repository import GenerationRepository
 from app.services.toy_vision import ToyVisionService
 from app.story_pipeline.artifacts import write_story_json
+from app.story_pipeline.illustrations import resolve_illustrated_pages
 from app.story_pipeline.models import StoryState
 from app.story_pipeline.pipeline import StageCallback, StoryPipeline
 from app.story_pipeline.providers.image import make_image_provider
@@ -108,6 +109,24 @@ PARTIAL_RESULT = (
     f"Причина: {PARTIAL_REASON}."
 )
 
+# Объяснение ограниченного числа иллюстраций перед постраничной выдачей.
+#
+# Отдельная константа, а не правка существующей: объяснения ограниченного
+# числа иллюстраций в проекте раньше не было, а смешивать его с `STORY_READY`
+# нельзя — сообщение о готовности приходит в конце, когда объяснять уже
+# нечего.
+#
+# Формулировка обходит русское склонение: существительное во множественном
+# числе одинаково и при одной картинке, и при трёх, поэтому отдельная
+# функция согласования ради одной строки не понадобилась. Номера подставляются
+# из фактического набора прогона: зашитая в текст тройка при
+# `STORY_DEFAULT_PAGES = 8` стала бы прямой ложью.
+FREE_ILLUSTRATION_NOTE = (
+    "В бесплатной книжке картинки есть не у каждой страницы — так она "
+    "устроена. Картинки нарисованы к страницам: {pages}. Остальные страницы "
+    "придут текстом, читайте их подряд."
+)
+
 # Итог прогона, у которого на месте все картинки, а текст остался с
 # замечаниями: `needs_review` ставится ещё и при исчерпании бюджета ревизий,
 # и тогда книжка доставлена целиком. Называть это «не полной» нельзя: родитель
@@ -123,6 +142,21 @@ REVIEW_RESULT = (
     "текст было уже нельзя — попытки кончились.\n"
     "Книжка при этом собрана целиком: все страницы на месте и все с "
     "иллюстрациями, читайте её как обычно."
+)
+
+# Итог книжки с замечаниями при ограниченном наборе иллюстраций.
+#
+# `REVIEW_RESULT` живёт в соседней ветке, которую это изменение не трогает, но
+# при `needs_review` она теперь срабатывает и для книжки «3 картинки из 6».
+# Родитель прочёл бы «все с иллюстрациями» и не получил картинок к 2, 3, 5 —
+# поэтому итог зависит от набора, а ловушка возвращается не через новый код,
+# а через старые константы.
+FREE_REVIEW_RESULT = (
+    f"{REVIEW_TITLE}: {REVIEW_REASON}. Проверка это заметила, а переписать "
+    "текст было уже нельзя — попытки кончились.\n"
+    "Книжка при этом собрана целиком по плану бесплатного варианта: все "
+    "страницы на месте, картинки нарисованы к тем страницам, что названы "
+    "выше. Читайте её как обычно."
 )
 
 # Повторная попытка предлагается один раз: без ограничения переделки
@@ -497,8 +531,31 @@ class StoryRunner:
         чтения.
         """
 
+        await self._announce_limited_illustrations(send, state)
         for page in sorted(state.pages, key=lambda item: item.page_num):
             await self._send_page(send, state, page.page_num, page.text)
+
+    async def _announce_limited_illustrations(
+        self,
+        send: SendFunc,
+        state: StoryState,
+    ) -> None:
+        """Один раз объяснить, что картинки есть не у каждой страницы.
+
+        Объяснение уходит перед постраничной выдачей и ровно один раз: перед
+        книжкой оно ещё что-то сообщает, а на каждой странице повторялось бы
+        как извинение за то, что не является сбоем.
+
+        При наборе, равном всем страницам, сообщение не отправляется вовсе —
+        тогда выдача выглядит ровно как раньше.
+        """
+
+        illustrated = self._illustrated_pages(state)
+        if len(illustrated) >= state.num_pages:
+            return
+        await send(
+            FREE_ILLUSTRATION_NOTE.format(pages=numbers_text(illustrated))
+        )
 
     async def _deliver_degraded(
         self,
@@ -518,8 +575,13 @@ class StoryRunner:
           сказка и повтор не предлагается (см. `_deliver_reviewed`).
         """
 
+        # Пропуски считаются по набору иллюстрируемых страниц, а не по всем
+        # страницам книги. Иначе книжка «3 картинки из 6» со статусом
+        # `needs_review` уходила бы в ветку частичного результата: квота не
+        # списывалась бы, а предложение «начать заново» квота разрешала бы —
+        # и бесплатная генерация становилась бы бесконечной.
         missing = sorted(
-            set(range(1, state.num_pages + 1))
+            set(self._illustrated_pages(state))
             - {art.page_num for art in state.images}
         )
         if not missing:
@@ -554,7 +616,14 @@ class StoryRunner:
             reason,
         )
         await self._deliver_pages(send, state)
-        await send(REVIEW_RESULT)
+        # Итог зависит от набора: при ограниченном числе картинок обещание
+        # «все страницы с иллюстрациями» было бы прямой ложью.
+        illustrated = self._illustrated_pages(state)
+        await send(
+            REVIEW_RESULT
+            if len(illustrated) >= state.num_pages
+            else FREE_REVIEW_RESULT
+        )
         await send(STORY_READY)
         await self._record_state_quietly(
             request,
@@ -612,6 +681,18 @@ class StoryRunner:
         )
 
     @staticmethod
+    def _illustrated_pages(state: StoryState) -> list[int]:
+        """Набор иллюстрируемых страниц прогона.
+
+        Тот же ридер, что и в пайплайне: пустое поле означает «набор не
+        задан», то есть иллюстрируются все страницы. Раннер и пайплайн должны
+        считать одно и то же, иначе прогон окажется «частичным» там, где
+        пайплайн сбоя не видел.
+        """
+
+        return sorted(set(resolve_illustrated_pages(state)))
+
+    @staticmethod
     def _technical_reason(state: StoryState) -> str:
         """Техническая причина статуса «требует проверки» из метрик прогона.
 
@@ -633,14 +714,27 @@ class StoryRunner:
         page_num: int,
         text: str,
     ) -> None:
-        """Отправить одну страницу: текст и, если есть, её картинку."""
+        """Отправить одну страницу: текст и, если есть, её картинку.
+
+        Отсутствие `PageArt` читается по-разному в зависимости от набора
+        иллюстрируемых страниц, и различие видно пользователю:
+
+        - страница вне набора: картинку не заказывали, поэтому страница уходит
+          текстом с номером и без извинения — объяснение пришло один раз
+          перед книжкой;
+        - страница из набора: картинку заказывали и не получили, это сбой,
+          и родитель должен видеть, почему в книжке дыра.
+        """
 
         title = f"{PAGE_TITLE} {page_num}\n{text}"
         art = next(
             (item for item in state.images if item.page_num == page_num), None
         )
         if art is None:
-            await send(f"{title}\n\n{PAGE_IMAGE_SKIPPED}")
+            if page_num in set(self._illustrated_pages(state)):
+                await send(f"{title}\n\n{PAGE_IMAGE_SKIPPED}")
+            else:
+                await send(title)
             return
 
         try:
@@ -882,6 +976,7 @@ class StoryRunner:
 
 
 __all__ = [
+    "FREE_ILLUSTRATION_NOTE",
     "ILLUSTRATE_STAGE",
     "PipelineFactory",
     "RunRequest",

@@ -13,8 +13,11 @@
 
 Каждому вызову передаётся детерминированный seed (`page_seed` для страниц,
 `CHARACTER_SHEET_SEED` для листа), а в конце сверяется фактическое покрытие
-страниц с `state.num_pages`. Это страховка: прогон не должен отчитываться
-`status == "ok"`, если файл какой-то страницы не написан.
+с набором иллюстрируемых страниц. Это страховка: прогон не должен
+отчитываться `status == "ok"`, если файл какой-то нарисованной страницы не
+написан. Обратная сторона той же проверки — страница вне набора обязана
+остаться нормой, а не сбоем, иначе ограничение превращается в бесконечную
+бесплатную генерацию.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from app.story_pipeline.errors import (
     PermanentImageGenerationError,
     TransientImageGenerationError,
 )
+from app.story_pipeline.illustrations import resolve_illustrated_pages
 from app.story_pipeline.models import (
     ExtractedEntities,
     PageArt,
@@ -153,11 +157,11 @@ class ImageGeneratorStage:
         self._aspect_ratio = aspect_ratio
 
     async def run(self, state: StoryState) -> StoryState:
-        """Сгенерировать reference-лист и страницы, записав пути и seed.
+        """Сгенерировать reference-лист и страницы набора, записав пути и seed.
 
-        В конце прогон проверяется на полноту: ожидаемые номера страниц
-        сверяются с фактически записанными файлами. Любой пробел (сбой
-        генерации, потерянная сцена, номер вне 1..N) переводит прогон в
+        В конце прогон проверяется на полноту: номера набора иллюстрируемых
+        страниц сверяются с фактически записанными файлами. Любой пробел (сбой
+        генерации, потерянная сцена, номер вне набора) переводит прогон в
         `needs_review` и попадает в `StageMetrics.error` — иначе результат с
         недостающей иллюстрацией выглядел бы успешным.
         """
@@ -186,11 +190,23 @@ class ImageGeneratorStage:
         state.character_sheet_path = str(sheet_path)
         state.character_sheet_seed = sheet.seed
 
-        art_prompts: list[str] = []
+        art_prompts: list[tuple[int, str]] = []
         failed_pages: list[int] = []
+        # Набор иллюстрируемых страниц решает, кому вообще заказывается
+        # картинка. Сцены вне набора пропускаются без вызова провайдера и без
+        # записи в `failed_pages`: их отсутствие заложено замыслом, поэтому
+        # платный вызов на них был бы расходом без результата, а запись о
+        # пропуске выглядела бы как сбой.
+        illustrated = set(resolve_illustrated_pages(state))
         for scene in state.scenes:
+            if scene.page_num not in illustrated:
+                logger.debug(
+                    "illustration: page {} is out of illustrated set, skipped",
+                    scene.page_num,
+                )
+                continue
             prompt = build_art_prompt(scene, entities)
-            art_prompts.append(prompt)
+            art_prompts.append((scene.page_num, prompt))
             try:
                 image = await self._provider.generate(
                     prompt,
@@ -241,13 +257,18 @@ class ImageGeneratorStage:
     ) -> str | None:
         """Сверить ожидаемые страницы с записанными и описать расхождение.
 
-        Проверяются три вещи: есть ли файл для каждой страницы 1..N, не лишние
-        ли это страницы и действительно ли файлы лежат на диске по указанным
-        путям. Сбойные страницы провайдера добавляются отдельным пунктом.
-        `None` означает полное покрытие.
+        Проверяются три вещи: есть ли файл для каждой иллюстрируемой страницы,
+        не лишние ли это страницы и действительно ли файлы лежат на диске по
+        указанным путям. Сбойные страницы провайдера добавляются отдельным
+        пунктом. `None` означает полное покрытие набора.
+
+        Ожидаемое покрытие берётся из набора иллюстрируемых страниц, а не из
+        `1..num_pages`. Иначе отсутствие картинки у страницы вне набора
+        выглядело бы сбоем: прогон получил бы `needs_review`, квота не
+        списалась бы, и бесплатная генерация стала бы бесконечной.
         """
 
-        expected = set(range(1, state.num_pages + 1))
+        expected = set(resolve_illustrated_pages(state))
         written = {art.page_num for art in state.images}
         missing = sorted(expected - written)
         out_of_range = sorted(written - expected)
@@ -266,7 +287,11 @@ class ImageGeneratorStage:
             numbers = ", ".join(
                 str(page_num) for page_num in out_of_range
             )
-            problems.append(f"страницы вне 1..{state.num_pages}: {numbers}")
+            # Формулировка про набор, а не про диапазон страниц: страницы вне
+            # набора не находятся «вне 1..N» — они вне набора. Строка уходит в
+            # `StageMetrics.error`, то есть в лог и в запись о прогоне, и
+            # разбор после инцидента читает именно её.
+            problems.append(f"страницы вне набора иллюстрируемых: {numbers}")
         if absent_files:
             problems.append(
                 "файлы страниц не записаны: "

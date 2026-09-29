@@ -209,6 +209,17 @@ class StoryState(BaseModel):
     age: int = Field(description="Целевой возраст читателя.")
     moral: str = Field(description="Мораль, которую несёт сказка.")
     num_pages: int = Field(default=6, description="Число страниц сказки.")
+    illustrated_pages: list[int] = Field(
+        default_factory=list,
+        description=(
+            "Номера страниц, для которых заказываются иллюстрации: "
+            "подмножество 1..num_pages. Пустой список означает «набор не "
+            "задан» — иллюстрируются все страницы. Набор лежит в состоянии "
+            "рядом со списком изображений, поэтому по артефакту прогона "
+            "видно, какие страницы не проиллюстрированы по замыслу, а "
+            "какие — из-за сбоя генерации."
+        ),
+    )
     toy_description: str | None = Field(
         default=None,
         description=(
@@ -226,8 +237,17 @@ class StoryState(BaseModel):
         default=None, description="Реестр извлечённых сущностей."
     )
     scenes: list[PageScene] = Field(default_factory=list, description="Раскадровка.")
-    art_prompts: list[str] = Field(
-        default_factory=list, description="Промпты изображений по страницам."
+    art_prompts: list[tuple[int, str]] = Field(
+        default_factory=list,
+        description=(
+            "Промпты изображений парами «номер страницы — промпт», причём "
+            "только для страниц из набора иллюстрируемых. Номер в паре "
+            "обязателен: неявная связь через порядок элементов списка "
+            "развалилась бы при первом же рефакторинге, а при разборе "
+            "прогона по такому полю видно, к какой странице относится "
+            "промпт. Промптов страниц вне набора здесь нет намеренно: "
+            "заказа под них не было, и их наличие читалось бы как сбой."
+        ),
     )
     character_sheet_path: str | None = Field(
         default=None, description="Путь к reference-изображению персонажей."

@@ -87,7 +87,7 @@ def _full_state() -> StoryState:
                 objects_in_scene=["Корзинка"],
             ),
         ],
-        art_prompts=["prompt 1", "prompt 2"],
+        art_prompts=[(1, "prompt 1"), (2, "prompt 2")],
         character_sheet_path="output/run/character_sheet.png",
         character_sheet_seed=42,
         images=[
@@ -172,6 +172,41 @@ def test_dump_has_no_binary_and_keeps_character_sheet() -> None:
     assert dumped["character_sheet_seed"] == 42
     assert all(isinstance(image["path"], str) for image in dumped["images"])
     assert isinstance(dumped["started_at"], str)
+
+
+def test_illustrated_pages_round_trip_and_default_is_isolated() -> None:
+    """Набор иллюстрируемых страниц переживает JSON-цикл.
+
+    Набор лежит в `story.json` рядом со списком изображений, поэтому по
+    артефакту прогона видно, какие страницы не проиллюстрированы по
+    замыслу, а какие — из-за сбоя генерации. Без сериализации этого
+    различения в артефакте не осталось бы вовсе.
+    """
+
+    state = _full_state().model_copy(update={"illustrated_pages": [1, 4, 6]})
+
+    dumped = state.model_dump(mode="json")
+    restored = StoryState.model_validate(dumped)
+
+    assert restored.illustrated_pages == [1, 4, 6]
+    assert restored == state
+
+
+def test_illustrated_pages_default_is_empty_and_isolated() -> None:
+    """Пустой набор по умолчанию: «набор не задан», а не «рисовать ничего»."""
+
+    assert StoryState(
+        theme="т", age=4, moral="м", started_at=datetime.now(timezone.utc)
+    ).illustrated_pages == []
+    # Списки по умолчанию не должны разделяться между экземплярами.
+    first = StoryState(
+        theme="т", age=4, moral="м", started_at=datetime.now(timezone.utc)
+    )
+    first.illustrated_pages.append(1)
+    second = StoryState(
+        theme="т", age=4, moral="м", started_at=datetime.now(timezone.utc)
+    )
+    assert second.illustrated_pages == []
 
 
 def test_toy_description_round_trips_as_plain_text() -> None:

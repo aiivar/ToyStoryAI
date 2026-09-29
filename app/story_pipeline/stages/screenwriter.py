@@ -20,6 +20,7 @@ from app.story_pipeline.models import (
     StageMetrics,
     StoryState,
 )
+from app.story_pipeline.illustrations import resolve_illustrated_pages
 from app.story_pipeline.prompts import (
     DUPLICATE_PAGE_NUMBERS,
     EXPECTED_PAGE_COUNT,
@@ -30,6 +31,7 @@ from app.story_pipeline.prompts import (
     SCREENWRITER_USER,
     duplicate_page_numbers,
     format_arc_plan,
+    format_illustration_plan,
     format_page_numbers,
     render_answer_format,
 )
@@ -82,7 +84,9 @@ class ScreenwriterStage:
         """Запросить страницы по схеме `PagesPayload` и записать в состояние.
 
         При неверном числе или нумерации страниц выполняется ровно один
-        корректирующий перезапрос с описанием проблем.
+        корректирующий перезапрос с описанием проблем. Перезапрос собирается
+        из того же `base_user`, поэтому набор иллюстрируемых страниц попадает
+        в оба запроса: иначе исправленный текст потерял бы требование к сцене.
         """
 
         started = time.perf_counter()
@@ -99,6 +103,12 @@ class ScreenwriterStage:
             arc_plan=format_arc_plan(brief.narrative_arc, state.num_pages),
             num_pages=state.num_pages,
             age=state.age,
+            # Набор иллюстрируемых страниц переносит требование визуальной
+            # сцены с «каждой страницы» на конкретные номера: визуальные
+            # вершины должны оказаться там, где их действительно нарисуют.
+            illustration_plan=format_illustration_plan(
+                list(resolve_illustrated_pages(state)), state.num_pages
+            ),
             schema=render_schema(PagesPayload),
             answer_format=render_answer_format(PagesPayload),
         )

@@ -21,6 +21,7 @@ from app.story_pipeline.models import (
     ExtractedEntities,
     KeyObject,
     Location,
+    PageArt,
     PageScene,
     StoryState,
 )
@@ -75,14 +76,24 @@ def _scene(page_num: int) -> PageScene:
     )
 
 
-def _state(output_dir: Path, num_scenes: int = 2) -> StoryState:
-    """Состояние с реестром, сценами и заданным каталогом вывода."""
+def _state(
+    output_dir: Path,
+    num_scenes: int = 2,
+    illustrated: list[int] | None = None,
+) -> StoryState:
+    """Состояние с реестром, сценами и заданным каталогом вывода.
+
+    `illustrated` — материализованный набор иллюстрируемых страниц. Пустое
+    значение (по умолчанию) означает «набор не задан», то есть иллюстрируются
+    все страницы: так проверяется прежнее поведение без ограничения.
+    """
 
     return StoryState(
         theme="дружба",
         age=5,
         moral="помогай друзьям",
         num_pages=num_scenes,
+        illustrated_pages=illustrated or [],
         entities=_entities(),
         scenes=[_scene(n) for n in range(1, num_scenes + 1)],
         output_dir=str(output_dir),
@@ -109,11 +120,16 @@ async def test_generates_sheet_first_then_pages_with_reference(
     assert sheet_call["reference_images"] is None
 
     # Страницы идут в порядке сцен, с промптами из build_art_prompt.
+    # Пустое поле набора = «иллюстрируются все страницы»: пары «номер —
+    # промпт» собираются для каждой сцены.
     expected_prompts = [
-        build_art_prompt(scene, entities) for scene in state.scenes
+        (scene.page_num, build_art_prompt(scene, entities))
+        for scene in state.scenes
     ]
     page_calls = provider.calls[1:]
-    assert [call["prompt"] for call in page_calls] == expected_prompts
+    assert [call["prompt"] for call in page_calls] == [
+        prompt for _, prompt in expected_prompts
+    ]
     assert state.art_prompts == expected_prompts
 
     # Файлы созданы, sheet передан как reference каждой странице.
@@ -521,3 +537,151 @@ async def test_scene_out_of_range_cannot_report_ok(
 
     assert state.status == "needs_review"
     assert state.metrics[-1].error is not None
+
+
+# --- Ограниченный набор иллюстрируемых страниц --------------------------
+
+
+async def test_budget_three_calls_provider_for_three_pages_and_sheet(
+    tmp_path: Path,
+    fake_image_provider,
+) -> None:
+    """При шести страницах и бюджете 3 провайдер вызван 4 раза: лист + 1, 4, 6.
+
+    Проверяется и число вызовов, и их номера: платный вызов на страницу вне
+    набора был бы расходом без результата, поэтому счётчик вызовов и есть
+    та граница, которую нужно удержать.
+    """
+
+    state = _state(tmp_path, num_scenes=6, illustrated=[1, 4, 6])
+    provider = fake_image_provider()
+
+    await ImageGeneratorStage(provider).run(state)
+
+    assert [call["seed"] for call in provider.calls] == [
+        CHARACTER_SHEET_SEED,
+        page_seed(1),
+        page_seed(4),
+        page_seed(6),
+    ]
+    assert [art.page_num for art in state.images] == [1, 4, 6]
+    for drawn in (1, 4, 6):
+        assert (tmp_path / f"page_{drawn}.png").is_file()
+    for skipped in (2, 3, 5):
+        assert not (tmp_path / f"page_{skipped}.png").exists()
+    # Пропуски по замыслу не считаются сбоем: прогон остаётся успешным.
+    assert state.status == "ok"
+    assert state.metrics[-1].error is None
+
+
+async def test_pages_out_of_set_are_not_recorded_as_failures(
+    tmp_path: Path,
+    fake_image_provider,
+) -> None:
+    """Страницы вне набора не попадают ни в один след провайдера.
+
+    Запись в `failed_pages` превратила бы замысел в сбой: прогон получил бы
+    `needs_review`, квота не списалась бы, и бесплатная генерация стала бы
+    бесконечной.
+    """
+
+    state = _state(tmp_path, num_scenes=6, illustrated=[1, 4, 6])
+    provider = fake_image_provider(
+        responses=[
+            GeneratedImage(data=b"sheet", seed=1),
+            TransientImageGenerationError("таймаут"),
+            GeneratedImage(data=b"page-4", seed=4),
+            GeneratedImage(data=b"page-6", seed=6),
+        ]
+    )
+
+    await ImageGeneratorStage(provider).run(state)
+
+    # Провайдер вызван только для 1, 4 и 6, и «таймаут» пришёлся на страницу 1.
+    assert len(provider.calls) == 4
+    assert [art.page_num for art in state.images] == [4, 6]
+    # Сбой на иллюстрируемой странице сохраняет прежнее поведение.
+    assert state.status == "needs_review"
+    error = state.metrics[-1].error
+    assert error is not None
+    assert "1" in error
+
+
+async def test_art_prompts_are_stored_with_page_numbers_of_the_set(
+    tmp_path: Path,
+    fake_image_provider,
+) -> None:
+    """Промпты хранятся парами «номер — промпт» и только для набора.
+
+    Привязка номером читается напрямую, а промпта страницы вне набора нет:
+    он вводил бы в заблуждение при разборе, будто картинку пытались
+    нарисовать и не вышло.
+    """
+
+    state = _state(tmp_path, num_scenes=6, illustrated=[1, 4, 6])
+    entities = state.entities
+    assert entities is not None
+
+    await ImageGeneratorStage(fake_image_provider()).run(state)
+
+    assert state.art_prompts == [
+        (1, build_art_prompt(_scene(1), entities)),
+        (4, build_art_prompt(_scene(4), entities)),
+        (6, build_art_prompt(_scene(6), entities)),
+    ]
+    # Номера в промптах совпадают с нарисованными страницами.
+    assert [number for number, _ in state.art_prompts] == [
+        art.page_num for art in state.images
+    ]
+
+
+async def test_absent_pictures_out_of_set_keep_run_ok(
+    tmp_path: Path,
+    fake_image_provider,
+) -> None:
+    """Отсутствие картинок у страниц вне набора — не сбой покрытия.
+
+    Регрессия на исходный дефект: ожидаемое покрытие бралось из
+    `1..num_pages`, поэтому книжка «3 картинки из 6» получала
+    `needs_review`, квота не списывалась, и бесплатная генерация
+    становилась бесконечной.
+    """
+
+    state = _state(tmp_path, num_scenes=6, illustrated=[1, 4, 6])
+
+    await ImageGeneratorStage(fake_image_provider()).run(state)
+
+    assert state.status == "ok"
+    assert state.metrics[-1].error is None
+    # Набор и список картинок лежат рядом в артефакте прогона, поэтому по
+    # сохранённому состоянию различие причин читается однозначно.
+    assert state.illustrated_pages == [1, 4, 6]
+    assert [art.page_num for art in state.images] == [1, 4, 6]
+
+
+async def test_extra_page_outside_set_reports_set_in_error(
+    tmp_path: Path,
+    fake_image_provider,
+) -> None:
+    """Лишняя картинка вне набора — сбой, и текст ошибки говорит о наборе.
+
+    Формулировка «вне 1..N» вводила бы в заблуждение: страница вне набора
+    не выходит за диапазон страниц, она вне набора. Строка уходит в лог и в
+    запись о прогоне, то есть это часть наблюдаемости.
+    """
+
+    state = _state(tmp_path, num_scenes=3, illustrated=[1])
+    # Страница 2 вне набора, но сцена для неё есть — она не рисуется вовсе,
+    # поэтому лишняя картинка добавляется вручную: так проверяется сама
+    # проверка покрытия, а не генерация.
+    stage = ImageGeneratorStage(fake_image_provider())
+    await stage.run(state)
+    extra_path = tmp_path / "page_2.png"
+    extra_path.write_bytes(b"unexpected")
+    state.images.append(PageArt(page_num=2, path=str(extra_path), seed=2))
+
+    error = ImageGeneratorStage._coverage_error(state, [])
+
+    assert error is not None
+    assert "вне набора иллюстрируемых" in error
+    assert "вне 1..3" not in error

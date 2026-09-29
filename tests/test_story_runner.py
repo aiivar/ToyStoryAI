@@ -267,6 +267,7 @@ def made_state(
     status: str = "ok",
     pages: int = 1,
     illustrated: tuple[int, ...] | None = None,
+    illustrated_set: tuple[int, ...] | None = None,
     image_bytes: bytes = b"\x89PNG-page",
     extension: str = ".png",
 ) -> StoryState:
@@ -274,6 +275,16 @@ def made_state(
 
     `extension` повторяет соглашение пайплайна: имя файла страницы строится
     по типу, который вернул провайдер, поэтому JPEG-файл лежит под `.jpg`.
+
+    Различаются два параметра, потому что различаются и две вещи:
+
+    - `illustrated` — у каких страниц картинка фактически есть;
+    - `illustrated_set` — набор страниц, которым картинка заказывалась.
+
+    Обычно они совпадают, и расходятся как раз в сценарии сбоя на
+    иллюстрируемой странице. `illustrated_set=None` оставляет поле пустым, то
+    есть «набор не задан» и иллюстрируются все страницы: так проверяется
+    прежнее поведение без ограничения.
     """
 
     illustrated = (
@@ -295,6 +306,7 @@ def made_state(
         age=4,
         moral=MORAL,
         num_pages=pages,
+        illustrated_pages=list(illustrated_set or []),
         started_at="2026-01-01T00:00:00Z",  # type: ignore[arg-type]
         pages=page_texts,
         images=images,
@@ -1200,6 +1212,296 @@ async def test_partial_result_offers_redo_only_once(tmp_path: Path) -> None:
         runner_module.PARTIAL_TITLE in (text or "")
         for text in bundle.bot.sent_texts
     )
+
+
+# --- Ограниченный набор иллюстрируемых страниц -----------------------------
+
+
+async def test_limited_illustrations_are_not_treated_as_partial(
+    tmp_path: Path,
+) -> None:
+    """Книжка «3 картинки из 6» доставлена целиком, а не частично.
+
+    Регрессия на исходный дефект, который это изменение устраняет: пропуски
+    считались по `1..num_pages`, поэтому страницы вне набора выглядели
+    сбоем. Прогон уходил в ветку частичного результата, квота не
+    расходовалась, а предложение «начать заново» квота разрешала — и
+    бесплатная генерация становилась бесконечной.
+    """
+
+    state = made_state(
+        tmp_path, pages=6, illustrated=(1, 4, 6), illustrated_set=(1, 4, 6)
+    )
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request(tale_id=21))
+
+    texts = [text for text in bundle.bot.sent_texts if text]
+    assert not any(text.startswith(runner_module.PARTIAL_TITLE) for text in texts)
+    # Квота списана: весь набор иллюстрируемых страниц отдан.
+    update = bundle.repository.updates[-1]
+    assert update["status"] is GenerationStatus.SUCCESS
+    # Повтор не предлагается — переделывать нечего.
+    assert runner_module.PARTIAL_REDO not in bundle.bot.sent_texts
+
+
+async def test_pages_out_of_set_come_as_plain_text(tmp_path: Path) -> None:
+    """Страница вне набора уходит текстом с номером и без извинения.
+
+    Извинение «картинку отрисовать не вышло» здесь было бы прямой ложью:
+    картинку к этой странице не заказывали, её отсутствие заложено замыслом.
+    """
+
+    state = made_state(
+        tmp_path, pages=4, illustrated=(1, 3), illustrated_set=(1, 3)
+    )
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request())
+
+    assert [item.text for item in page_messages(bundle.bot)] == [
+        "Страница 1\nТекст страницы 1.",
+        "Страница 2\nТекст страницы 2.",
+        "Страница 3\nТекст страницы 3.",
+        "Страница 4\nТекст страницы 4.",
+    ]
+    assert not any(
+        runner_module.PAGE_IMAGE_SKIPPED in (item.text or "")
+        for item in page_messages(bundle.bot)
+    )
+
+
+async def test_page_in_set_without_picture_still_explains_failure(
+    tmp_path: Path,
+) -> None:
+    """Страница из набора без картинки сохраняет `PAGE_IMAGE_SKIPPED`.
+
+    Это настоящий сбой: картинку заказывали, а получить не удалось. Родитель
+    должен видеть причину дыры, иначе он не поймёт, что произошло.
+    """
+
+    state = made_state(
+        tmp_path,
+        status="needs_review",
+        pages=4,
+        illustrated=(1, 3),
+        illustrated_set=(1, 2, 3),
+    )
+    state.metrics.append(
+        StageMetrics(
+            stage="illustrate",
+            duration_ms=10.0,
+            error="illustration: page 2 failed after retries: HTTP 429",
+        )
+    )
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request())
+
+    texts = {item.text for item in page_messages(bundle.bot)}
+    assert (
+        f"Страница 2\nТекст страницы 2.\n\n"
+        f"{runner_module.PAGE_IMAGE_SKIPPED}" in texts
+    )
+    # Страница вне набора извинения не получает.
+    assert "Страница 4\nТекст страницы 4." in texts
+
+
+async def test_illustration_note_names_run_pages_and_sends_once(
+    tmp_path: Path,
+) -> None:
+    """Объяснение названо один раз и содержит номера фактического прогона."""
+
+    state = made_state(
+        tmp_path, pages=6, illustrated=(1, 4, 6), illustrated_set=(1, 4, 6)
+    )
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request())
+
+    notes = [
+        text
+        for text in bundle.bot.sent_texts
+        if text and "Картинки нарисованы к страницам" in text
+    ]
+    assert len(notes) == 1
+    assert "1, 4, 6" in notes[0]
+    # Объяснение приходит до постраничной выдачи, а не после неё.
+    texts = [text for text in bundle.bot.sent_texts if text]
+    assert texts.index(notes[0]) < texts.index("Страница 1\nТекст страницы 1.")
+    # Страницы без картинки объяснение не сопровождает.
+    for item in page_messages(bundle.bot):
+        assert "Картинки нарисованы к страницам" not in (item.text or "")
+
+
+async def test_illustration_note_never_hardcodes_page_numbers(
+    tmp_path: Path,
+) -> None:
+    """Номера в объяснении берутся из прогона, а не зашиты в текст.
+
+    Зашитая тройка при `STORY_DEFAULT_PAGES = 8` стала бы прямой ложью:
+    набор был бы (1, 6, 8), а пользователь прочёл бы «1, 4, 6».
+    """
+
+    state = made_state(
+        tmp_path, pages=8, illustrated=(1, 6, 8), illustrated_set=(1, 6, 8)
+    )
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request())
+
+    note = next(
+        text
+        for text in bundle.bot.sent_texts
+        if text and "Картинки нарисованы к страницам" in text
+    )
+    assert "1, 6, 8" in note
+    assert "1, 4, 6" not in note
+
+
+async def test_limited_illustrations_get_their_own_review_result(
+    tmp_path: Path,
+) -> None:
+    """Итог с замечаниями не обещает иллюстраций у каждой страницы.
+
+    `needs_review` ставится и при исчерпании бюджета ревизий, и тогда
+    книжка доставлена целиком. При ограниченном наборе старый текст «все
+    страницы с иллюстрациями» был бы ложью: родитель не получил картинок к
+    страницам 2, 3, 5.
+    """
+
+    state = made_state(
+        tmp_path,
+        status="needs_review",
+        pages=6,
+        illustrated=(1, 4, 6),
+        illustrated_set=(1, 4, 6),
+    )
+    state.metrics.append(
+        StageMetrics(
+            stage="quality",
+            duration_ms=10.0,
+            error="judge: passed=false after 2 revisions",
+        )
+    )
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request(tale_id=22))
+
+    summary = next(
+        text
+        for text in bundle.bot.sent_texts
+        if text and text.startswith(runner_module.REVIEW_TITLE)
+    )
+    assert "бесплатного варианта" in summary
+    assert "все с иллюстрациями" not in summary
+    # Причина в чате — про текст, а не про отказ сервиса картинок.
+    assert "отрисовать" not in summary
+    update = bundle.repository.updates[-1]
+    assert update["status"] is GenerationStatus.SUCCESS
+    assert "judge: passed=false" in str(update["error"])
+
+
+async def test_full_set_keeps_plain_review_result(tmp_path: Path) -> None:
+    """При полном наборе итог прежний: все страницы с иллюстрациями."""
+
+    state = made_state(
+        tmp_path,
+        status="needs_review",
+        pages=2,
+        illustrated=(1, 2),
+        illustrated_set=(1, 2),
+    )
+    state.metrics.append(
+        StageMetrics(
+            stage="quality",
+            duration_ms=10.0,
+            error="judge: passed=false after 2 revisions",
+        )
+    )
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request())
+
+    summary = next(
+        text
+        for text in bundle.bot.sent_texts
+        if text and text.startswith(runner_module.REVIEW_TITLE)
+    )
+    assert "все с иллюстрациями" in summary
+    assert "бесплатного варианта" not in summary
+
+
+async def test_full_set_sends_no_illustration_note(tmp_path: Path) -> None:
+    """При наборе, равном всем страницам, выдача выглядит как раньше."""
+
+    state = made_state(
+        tmp_path,
+        pages=6,
+        illustrated=(1, 2, 3, 4, 5, 6),
+        illustrated_set=(1, 2, 3, 4, 5, 6),
+    )
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request())
+
+    assert not any(
+        "Картинки нарисованы к страницам" in (text or "")
+        for text in bundle.bot.sent_texts
+    )
+    # Каждая страница пришла текстом вместе со своей картинкой.
+    pages = page_messages(bundle.bot)
+    assert len(pages) == 6
+    assert all(item.attachments for item in pages)
+
+
+async def test_real_failure_on_illustrated_page_keeps_partial_branch(
+    tmp_path: Path,
+) -> None:
+    """Сбой на иллюстрируемой странице — это по-прежнему частичный результат.
+
+    Регрессионный тест на семантику реального сбоя: ограничение не должно
+    было размыть границу между «так задумано» и «не получилось». Прежнее
+    поведение сохраняется целиком — `FAILED`, нерасходуемая квота, одно
+    предложение переделать и итог про сбой, а не про бесплатный вариант.
+    """
+
+    state = made_state(
+        tmp_path,
+        status="needs_review",
+        pages=6,
+        illustrated=(1, 6),
+        illustrated_set=(1, 4, 6),
+    )
+    state.metrics.append(
+        StageMetrics(
+            stage="illustrate",
+            duration_ms=10.0,
+            error=(
+                "illustration: page 4 failed after retries: "
+                "TransientImageGenerationError (HTTP 429)"
+            ),
+        )
+    )
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request(tale_id=23))
+
+    texts = [text for text in bundle.bot.sent_texts if text]
+    # Пропуск назван по набору: отсутствует именно страница 4, а не 2, 3, 5.
+    summary = next(
+        text for text in texts if text.startswith(runner_module.PARTIAL_TITLE)
+    )
+    assert "4" in summary
+    assert runner_module.PARTIAL_REASON in summary
+    # Итог описывает сбой, а не ограничение бесплатного варианта.
+    assert not any(runner_module.REVIEW_TITLE in text for text in texts)
+    assert not any("бесплатного варианта" in text for text in texts)
+    # Квота не списана, предложение переделать — ровно одно.
+    update = bundle.repository.updates[-1]
+    assert update["status"] is GenerationStatus.FAILED
+    assert update["error"]
+    assert texts.count(runner_module.PARTIAL_REDO) == 1
 
 
 # --- 5.8: остановка polling ---------------------------------------------------
