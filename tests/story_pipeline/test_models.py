@@ -209,6 +209,69 @@ def test_illustrated_pages_default_is_empty_and_isolated() -> None:
     assert second.illustrated_pages == []
 
 
+def test_page_words_round_trip_with_short_pages() -> None:
+    """Границы объёма и недобор переживают JSON-цикл.
+
+    По `story.json` должно быть видно, какой объём просили и какие страницы
+    не дотянули: без этого разбор прогона не отличил бы «модель не
+    попала в диапазон» от «объём не измерялся вовсе».
+    """
+
+    state = _full_state().model_copy(
+        update={"page_words_min": 80, "page_words_max": 140, "short_pages": [2]}
+    )
+
+    dumped = state.model_dump(mode="json")
+    json.dumps(dumped)
+    restored = StoryState.model_validate(dumped)
+
+    assert restored.page_words_min == 80
+    assert restored.page_words_max == 140
+    assert restored.short_pages == [2]
+    assert restored == state
+
+
+def test_page_words_default_to_unset_and_short_pages_to_empty() -> None:
+    """Не заданные границы — `None`, недобор — пустой список.
+
+    `None`, а не 60/120: иначе нельзя отличить «границы не заданы»
+    (их возьмёт оркестратор из настроек) от явно заданного числа.
+    """
+
+    def make_state() -> StoryState:
+        return StoryState(
+            theme="t",
+            age=4,
+            moral="m",
+            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+
+    state = make_state()
+
+    assert state.page_words_min is None
+    assert state.page_words_max is None
+    assert state.short_pages == []
+    # Мутабельный список по умолчанию не делится между экземплярами.
+    state.short_pages.append(1)
+    assert make_state().short_pages == []
+
+
+def test_short_pages_survive_round_trip_of_minimal_state() -> None:
+    """Даже минимальное состояние с недобором остаётся разбираемым."""
+
+    state = StoryState(
+        theme="t",
+        age=4,
+        moral="m",
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    ).model_copy(update={"page_words_min": 60, "page_words_max": 120})
+
+    restored = StoryState.model_validate(state.model_dump(mode="json"))
+
+    assert restored.short_pages == []
+    assert restored.page_words_max == 120
+
+
 def test_toy_description_round_trips_as_plain_text() -> None:
     """Описание игрушки переживает JSON-цикл и остаётся строкой, не бинарём."""
 

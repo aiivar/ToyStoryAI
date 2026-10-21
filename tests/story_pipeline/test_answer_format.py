@@ -217,7 +217,15 @@ def _entities() -> ExtractedEntities:
 
 
 def _pages(nums: list[int]) -> list[PageText]:
-    return [PageText(page_num=n, text=f"Текст страницы {n}.") for n in nums]
+    # Текст добивается до 70 слов: дефолтные границы объёма страницы
+    # применяются к каждому прогону, и короткая заготовка означала бы лишний
+    # корректирующий перезапрос вместо проверяемого поведения.
+    return [
+        PageText(
+            page_num=n, text=f"Текст страницы {n}. " + " ".join(["слово"] * 70)
+        )
+        for n in nums
+    ]
 
 
 def _scene(page_num: int, name: str = "нет") -> PageScene:

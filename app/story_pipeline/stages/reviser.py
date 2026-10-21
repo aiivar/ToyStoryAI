@@ -25,6 +25,7 @@ from app.story_pipeline.models import (
     StageMetrics,
     StoryState,
 )
+from app.story_pipeline.page_words import resolve_page_words
 from app.story_pipeline.prompts import (
     REVISER_SYSTEM,
     REVISER_USER,
@@ -91,11 +92,16 @@ class ReviserStage:
 
         problem_set = set(problem_pages)
         verdict = state.judge_history[-1]
+        # Те же границы объёма, что были заданы сценаристу: без них ревизор
+        # трактует «устрани замечание» как «сократи» и откатывает объём.
+        words_min, words_max = resolve_page_words(state)
         user = REVISER_USER.format(
             logline=brief.logline,
             controlling_idea=brief.controlling_idea,
             character_arc=brief.character_arc,
             issues=format_issues(verdict.issues),
+            words_min=words_min,
+            words_max=words_max,
             problem_context=format_scene_pages(
                 [
                     scene

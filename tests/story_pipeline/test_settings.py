@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -28,6 +30,8 @@ _STORY_ENV_VARS = (
     "STORY_PAGES_MIN",
     "STORY_PAGES_MAX",
     "STORY_ILLUSTRATED_PAGES",
+    "STORY_PAGE_WORDS_MIN",
+    "STORY_PAGE_WORDS_MAX",
     "STORY_MAX_REVISIONS",
     "STORY_AGE_MIN",
     "STORY_AGE_MAX",
@@ -42,6 +46,35 @@ def _clear_story_env(monkeypatch) -> None:
     monkeypatch.delenv("MAX_BOT_TOKEN", raising=False)
 
 
+def _default_literal(value: object) -> str:
+    """Запись дефолта так, как её пишут в `.env` и README.
+
+    Целые таймауты в документации записаны без дробной части (`60`), хотя в
+    модели это float, — иначе документ учил бы писать `60.0` там, где
+    человек всё равно пишет `60`. Сравнение по точному `str()` ловило бы эту
+    разницу записи, а не расхождение значения.
+    """
+
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _read_env_example() -> str:
+    """Текст `.env.example` — источник истины по именам переменных."""
+
+    return (_PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
+
+
+def _read_readme() -> str:
+    """Текст README с таблицей переменных окружения."""
+
+    return (_PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
+
+
 def test_defaults_without_max_bot_token(monkeypatch) -> None:
     """StorySettings создаётся без MAX_BOT_TOKEN и с ожидаемыми значениями."""
 
@@ -53,7 +86,9 @@ def test_defaults_without_max_bot_token(monkeypatch) -> None:
     assert config.deepseek_base_url == "https://api.deepseek.com"
     assert config.deepseek_model == "deepseek-flash"
     assert config.deepseek_timeout == 60.0
-    assert config.deepseek_max_tokens == 4096
+    # Лимит поднят вдвое: при втрое более длинном тексте страниц и
+    # STORY_PAGES_MAX = 12 прежних 4096 хватало впритык.
+    assert config.deepseek_max_tokens == 8192
 
     assert config.routerai_api_key == ""
     assert config.routerai_base_url == "https://routerai.ru/api/v1"
@@ -66,6 +101,10 @@ def test_defaults_without_max_bot_token(monkeypatch) -> None:
     assert config.story_pages_min == 1
     assert config.story_pages_max == 12
     assert config.story_illustrated_pages == 3
+    # Границы объёма страницы: примерно втрое больше прежних 2–3 предложений,
+    # но заданы числом слов, которое код способен посчитать и проверить.
+    assert config.story_page_words_min == 60
+    assert config.story_page_words_max == 120
     assert config.story_max_revisions == 2
     assert config.story_age_min == 3
     assert config.story_age_max == 6
@@ -82,6 +121,8 @@ def test_environment_overrides_defaults(monkeypatch) -> None:
     monkeypatch.setenv("STORY_IMAGE_ASPECT_RATIO", "3:2")
     monkeypatch.setenv("STORY_DEFAULT_PAGES", "8")
     monkeypatch.setenv("STORY_ILLUSTRATED_PAGES", "0")
+    monkeypatch.setenv("STORY_PAGE_WORDS_MIN", "40")
+    monkeypatch.setenv("STORY_PAGE_WORDS_MAX", "90")
     monkeypatch.setenv("STORY_AGE_MAX", "8")
     monkeypatch.setenv("STORY_OUTPUT_DIR", "runs")
 
@@ -93,8 +134,74 @@ def test_environment_overrides_defaults(monkeypatch) -> None:
     assert config.story_image_aspect_ratio == "3:2"
     assert config.story_default_pages == 8
     assert config.story_illustrated_pages == 0
+    assert config.story_page_words_min == 40
+    assert config.story_page_words_max == 90
     assert config.story_age_max == 8
     assert config.story_output_dir == "runs"
+
+
+def test_page_words_defaults_come_from_settings(monkeypatch) -> None:
+    """Дефолты границ объёма живут в настройках, а не в коде этапов.
+
+    Подбор цифр идёт по итогам живых прогонов и обязан обходиться без
+    правки кода, поэтому дефолт — одно число в одном месте.
+    """
+
+    _clear_story_env(monkeypatch)
+
+    config = StorySettings(_env_file=None)  # type: ignore[call-arg]
+
+    assert config.story_page_words_min == 60
+    assert config.story_page_words_max == 120
+    assert config.story_page_words_max > config.story_page_words_min
+
+
+@pytest.mark.parametrize(
+    ("words_min", "words_max", "expected_var"),
+    [
+        (120, 60, "STORY_PAGE_WORDS_MAX"),
+        (100, 50, "STORY_PAGE_WORDS_MAX"),
+        (0, 120, "STORY_PAGE_WORDS_MIN"),
+        (60, 0, "STORY_PAGE_WORDS_MAX"),
+        (-10, 120, "STORY_PAGE_WORDS_MIN"),
+        (60, -10, "STORY_PAGE_WORDS_MAX"),
+    ],
+)
+def test_degenerate_page_words_are_rejected(
+    words_min: int,
+    words_max: int,
+    expected_var: str,
+) -> None:
+    """Вырожденная пара объёма отклоняется с упоминанием переменной.
+
+    Пустой или неположительный диапазон — это не «писать как получится»,
+    а опечатка в `.env`: обнаружить её надо до первого платного вызова,
+    иначе прогон потратит деньги на заведомо деградированный текст.
+    """
+
+    with pytest.raises(ValidationError) as failure:
+        StorySettings(  # type: ignore[call-arg]
+            _env_file=None,
+            story_page_words_min=words_min,
+            story_page_words_max=words_max,
+        )
+
+    message = str(failure.value)
+    assert expected_var in message
+    assert "STORY_PAGE_WORDS" in message
+
+
+def test_page_words_range_from_environment_is_validated(monkeypatch) -> None:
+    """Ошибка в `.env` ловится при загрузке настроек, а не в середине прогона."""
+
+    _clear_story_env(monkeypatch)
+    monkeypatch.setenv("STORY_PAGE_WORDS_MIN", "150")
+    monkeypatch.setenv("STORY_PAGE_WORDS_MAX", "80")
+
+    with pytest.raises(ValidationError) as failure:
+        StorySettings(_env_file=None)  # type: ignore[call-arg]
+
+    assert "STORY_PAGE_WORDS_MAX" in str(failure.value)
 
 
 def test_get_story_settings_returns_instance(monkeypatch, tmp_path) -> None:
@@ -146,6 +253,70 @@ def test_empty_aspect_ratio_means_provider_default() -> None:
     )
 
     assert config.story_image_aspect_ratio == ""
+
+
+def test_env_example_documents_every_pipeline_setting(monkeypatch) -> None:
+    """`.env.example` перечисляет каждое поле `StorySettings` с его дефолтом.
+
+    Расхождение документации с кодом опаснее отсутствия записи: человек
+    подкручивает прогон по файлу-примеру, меняет несуществующую переменную и
+    получает поведение, которого не ожидал.
+    """
+
+    _clear_story_env(monkeypatch)
+    config = StorySettings(_env_file=None)  # type: ignore[call-arg]
+    env_example = _read_env_example()
+
+    mismatches: list[str] = []
+    for name, field in StorySettings.model_fields.items():
+        var = name.upper()
+        if var not in env_example:
+            mismatches.append(f"{var}: нет в .env.example")
+            continue
+        default = field.get_default(call_default_factory=True)
+        if default is None or isinstance(default, (str, list, tuple)):
+            continue
+        if f"{var}={_default_literal(default)}" not in env_example:
+            mismatches.append(
+                f"{var}: дефолт {_default_literal(default)} != .env.example"
+            )
+
+    assert mismatches == [], "; ".join(mismatches)
+
+
+def test_readme_table_documents_every_pipeline_setting(monkeypatch) -> None:
+    """Таблица README содержит каждую настройку пайплайна и её дефолт.
+
+    Таблица — то, что читают перед первым запуском с реальным ключом; её
+    расхождение с кодом стоит дороже всего остального.
+    """
+
+    _clear_story_env(monkeypatch)
+    readme = _read_readme()
+
+    missing: list[str] = []
+    for name, field in StorySettings.model_fields.items():
+        var = name.upper()
+        row = next(
+            (
+                line
+                for line in readme.splitlines()
+                if line.startswith(f"| `{var}`")
+            ),
+            None,
+        )
+        if row is None:
+            missing.append(f"{var}: нет строки в таблице README")
+            continue
+        default = field.get_default(call_default_factory=True)
+        if default is None or isinstance(default, (str, list, tuple)):
+            continue
+        if f"| `{_default_literal(default)}` |" not in row:
+            missing.append(
+                f"{var}: дефолт {_default_literal(default)} != таблица README"
+            )
+
+    assert missing == [], "; ".join(missing)
 
 
 def test_negative_illustration_budget_is_rejected() -> None:

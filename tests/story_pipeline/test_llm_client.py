@@ -37,11 +37,14 @@ def _chat_response(
     *,
     prompt_tokens: int = 11,
     completion_tokens: int = 22,
+    finish_reason: str = "stop",
 ) -> dict[str, Any]:
     """Собрать ответ DeepSeek в формате Chat Completions."""
 
     return {
-        "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+        "choices": [
+            {"message": {"content": content}, "finish_reason": finish_reason}
+        ],
         "usage": {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -128,7 +131,7 @@ async def test_sends_openai_compatible_json_request() -> None:
     assert body["temperature"] == 0.3
     assert body["response_format"] == {"type": "json_object"}
     assert body["stream"] is False
-    assert body["max_tokens"] == 4096
+    assert body["max_tokens"] == 8192
 
 
 @pytest.mark.parametrize("fence_open", ["```json", "```"])
@@ -341,6 +344,172 @@ async def test_schema_mismatch_twice_raises_schema_validation_error() -> None:
         await http_client.aclose()
 
     assert calls["count"] == 2
+
+
+async def test_truncated_response_reports_token_limit_not_schema() -> None:
+    """Обрыв по лимиту токенов называет лимит, а не «невалидную схему».
+
+    Обрезанный по `max_tokens` ответ почти всегда невалиден, и прежняя
+    формулировка сваливала бы вину на модель, хотя виноват лимит, и
+    подсказывала не то, что нужно увеличить.
+    """
+
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(
+            200,
+            json=_chat_response(
+                json.dumps({"name": "заяц"}),
+                finish_reason="length",
+            ),
+        )
+
+    client, http_client = _make_client(handler)
+    try:
+        with pytest.raises(PermanentLLMError) as failure:
+            await client.complete_json(
+                system="система",
+                user="пользователь",
+                schema=_Dummy,
+                temperature=0.7,
+            )
+    finally:
+        await http_client.aclose()
+
+    message = str(failure.value)
+    assert "DEEPSEEK_MAX_TOKENS" in message
+    assert "не успел дописать" in message
+    # Повтор по схеме не тратится на заведомо обрезанный ответ: второй запрос
+    # упёрся бы в тот же лимит.
+    assert calls["count"] == 1
+
+
+async def test_truncated_response_is_not_retried_as_schema_error() -> None:
+    """Обрыв отличается от схемной ошибки и не уходит в корректирующий повтор."""
+
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(
+            200,
+            json=_chat_response(
+                json.dumps({"name": "заяц"}),
+                finish_reason="length",
+            ),
+        )
+
+    client, http_client = _make_client(handler)
+    try:
+        with pytest.raises(PermanentLLMError):
+            await client.complete_json(
+                system="система",
+                user="пользователь",
+                schema=_Dummy,
+                temperature=0.7,
+            )
+    finally:
+        await http_client.aclose()
+
+    assert calls["count"] == 1
+
+
+async def test_complete_invalid_response_still_uses_correction() -> None:
+    """Полный невалидный ответ по-прежнему чинится корректирующим повтором.
+
+    Регрессия на разведение двух видов отказа: постоянная ошибка обрыва не
+    должна была отнять у клиента его обычную схемную починку.
+    """
+
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return httpx.Response(
+                200,
+                json=_chat_response(
+                    json.dumps({"name": "заяц"}), finish_reason="length"
+                ),
+            )
+        return httpx.Response(
+            200,
+            json=_chat_response(json.dumps({"name": "заяц", "count": 4})),
+        )
+
+    client, http_client = _make_client(handler)
+    try:
+        with pytest.raises(PermanentLLMError):
+            await client.complete_json(
+                system="система",
+                user="пользователь",
+                schema=_Dummy,
+                temperature=0.7,
+            )
+    finally:
+        await http_client.aclose()
+
+    assert calls["count"] == 1
+
+
+async def test_full_schema_mismatch_still_uses_one_correction() -> None:
+    """`finish_reason == "stop"` с невалидным ответом — обычная схемная ошибка."""
+
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(
+            200,
+            json=_chat_response(json.dumps({"name": "заяц"})),
+        )
+
+    client, http_client = _make_client(handler)
+    try:
+        with pytest.raises(SchemaValidationError):
+            await client.complete_json(
+                system="система",
+                user="пользователь",
+                schema=_Dummy,
+                temperature=0.7,
+            )
+    finally:
+        await http_client.aclose()
+
+    assert calls["count"] == 2
+
+
+async def test_request_carries_default_max_tokens_of_8192() -> None:
+    """Дефолт лимита поднят вдвое: 12 страниц длинного текена в 4096 не влезают.
+
+    Проверяется фактическое тело запроса, а не значение настройки: дефолт,
+    который не доезжает до вендора, не спасает ни один живой прогон.
+    """
+
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200,
+            json=_chat_response(json.dumps({"name": "заяц", "count": 1})),
+        )
+
+    client, http_client = _make_client(handler)
+    try:
+        await client.complete_json(
+            system="система",
+            user="пользователь",
+            schema=_Dummy,
+            temperature=0.7,
+        )
+    finally:
+        await http_client.aclose()
+
+    body = json.loads(captured[0].content.decode())
+    assert body["max_tokens"] == 8192
 
 
 async def test_network_error_is_transient_and_retried() -> None:

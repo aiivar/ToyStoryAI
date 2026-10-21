@@ -26,15 +26,29 @@
 from __future__ import annotations
 
 import ast
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from app.story_pipeline import prompts
-from app.story_pipeline.errors import SchemaValidationError
-from app.story_pipeline.models import PageText
+from app.story_pipeline.errors import SchemaValidationError, StoryPipelineError
+from app.story_pipeline.models import (
+    NarrativeArc,
+    PagesPayload,
+    PageText,
+    StoryBrief,
+    StoryState,
+)
 from app.story_pipeline.providers import llm as llm_module
-from app.story_pipeline.providers.llm import build_schema_correction_prompt
+from app.story_pipeline.providers.llm import (
+    Usage,
+    build_schema_correction_prompt,
+)
 from app.story_pipeline.stages import screenwriter as screenwriter_module
-from app.story_pipeline.stages.screenwriter import validate_page_count
+from app.story_pipeline.stages.screenwriter import (
+    ScreenwriterStage,
+    validate_page_count,
+)
 
 PACKAGE_ROOT = Path(llm_module.__file__).resolve().parent.parent
 PROMPTS_PATH = Path(prompts.__file__).resolve()
@@ -167,6 +181,109 @@ def test_validator_problem_messages_come_from_prompts() -> None:
     source = Path(screenwriter_module.__file__).read_text("utf-8")
     assert prompts.EXPECTED_PAGE_COUNT not in source
     assert "Ожидалось ровно" not in source
+
+
+def test_short_page_problem_text_lives_in_prompts_module() -> None:
+    """Формулировка проблемы о короткой странице — константа `prompts.py`.
+
+    Задача 2.2: номер страницы и её фактический объём уходят в модель, поэтому
+    текст проблемы обязан жить рядом с остальными формулировками, а не в
+    модуле этапа. Шаблон проверяется на подстановку, а не только наличие:
+    подстановка без плейсхолдеров означала бы, что модель не получит ни
+    номера страницы, ни её объёма, и перепишет всё подряд.
+    """
+
+    template = prompts.PAGE_TOO_SHORT
+
+    assert "{page_num}" in template
+    assert "{words}" in template
+    assert "{expected}" in template
+    rendered = template.format(page_num=4, words=31, expected=60)
+    assert "4" in rendered
+    assert "31" in rendered
+    assert "60" in rendered
+    # Текст не должен дублироваться в модуле этапа.
+    source = Path(screenwriter_module.__file__).read_text("utf-8")
+    assert "слов при минимуме" not in source
+
+
+class _ShortPagesLLM:
+    """Фейк `LLMClient`, всегда возвращающий заведомо короткие страницы.
+
+    Отдельный мини-фейк вместо общей фикстуры: тесту нужен именно отказ по
+    объёму, а не прогон целиком, поэтому заготовок на весь граф тут нет.
+    """
+
+    def __init__(self, pages: list[PageText]) -> None:
+        self._pages = pages
+        self.calls: list[dict[str, Any]] = []
+
+    @property
+    def call_count(self) -> int:
+        return len(self.calls)
+
+    async def complete_json(self, **kwargs: Any) -> tuple[Any, Usage]:
+        self.calls.append(kwargs)
+        return PagesPayload(pages=self._pages), Usage(
+            prompt_tokens=1, completion_tokens=1
+        )
+
+
+async def test_short_page_problem_reaches_the_repair_request() -> None:
+    """Проблема о короткой странице реально подставляется в перезапрос.
+
+    Проверяется через публичный интерфейс этапа, а не константой: шаблон,
+    который никто не подставляет, выглядел бы в тестах зелёным, а модель
+    получила бы починочный запрос без указания, что именно переписать.
+    """
+
+    llm = _ShortPagesLLM(
+        [
+            PageText(page_num=1, text="Раз."),
+            PageText(page_num=2, text="Два."),
+        ]
+    )
+    state = StoryState(
+        theme="Тема сказки",
+        age=6,
+        moral="Мораль сказки",
+        num_pages=2,
+        page_words_min=60,
+        page_words_max=120,
+        brief=_story_brief(),
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    try:
+        await ScreenwriterStage(llm).run(state)  # type: ignore[arg-type]
+    except StoryPipelineError:
+        # Неважно, чем закончился этап: интересует второй запрос.
+        pass
+
+    assert llm.call_count == 2
+    repair_user = llm.calls[1]["user"]
+    rendered = prompts.PAGE_TOO_SHORT.format(page_num=1, words=1, expected=60)
+    assert rendered in repair_user
+    rendered_second = prompts.PAGE_TOO_SHORT.format(
+        page_num=2, words=1, expected=60
+    )
+    assert rendered_second in repair_user
+
+
+def _story_brief() -> StoryBrief:
+    """Заготовка брифа, который получает этап сценариста."""
+
+    return StoryBrief(
+        logline="Мишка идёт через лес и находит друга.",
+        controlling_idea="Смелость открывает дорогу к дружбе.",
+        character_arc="Мишка учится не бояться.",
+        narrative_arc=NarrativeArc(
+            exposition="Мишка живёт в шкафу.",
+            rising_action="Мишка выходит в лес.",
+            climax="Мишка спасает зайца.",
+            resolution="Мишка и заяц дружат.",
+        ),
+    )
 
 
 def test_scene_coverage_prompt_is_centralized() -> None:

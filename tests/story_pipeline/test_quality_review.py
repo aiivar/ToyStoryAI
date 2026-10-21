@@ -406,6 +406,76 @@ async def test_reviser_prompt_carries_issues_and_problem_context(
     assert '"title": "RevisionPayload"' in user
 
 
+async def test_reviser_prompt_carries_the_same_word_bounds(fake_llm) -> None:
+    """Промпт ревизора несёт границы объёма того же прогона.
+
+    Без границы ревизор получает «устрани замечание» и по привычке сжимает
+    страницу до краткой пересказной формы — то есть правка по замечанию судьи
+    отменяла бы ровно то, ради чего объём поднимали. Судье критерий о длине не
+    даётся намеренно: замечание о длине вело бы к тому же сжатию.
+    """
+
+    verdict = JudgeVerdict(
+        passed=False,
+        issues=["Сцена страницы 2 не совпадает с текстом."],
+        problem_pages=[2],
+    )
+    revised_page = PageText(page_num=2, text="Правка текста страницы 2.")
+    revised_scene = PageScene(
+        page_num=2,
+        scene_description="Мишка у ручья.",
+        characters_in_scene=["Мишка"],
+        location="Лес",
+        objects_in_scene=[],
+    )
+    llm = fake_llm(
+        [RevisionPayload(pages=[revised_page], scenes=[revised_scene])]
+    )
+    state = _state()
+    state.page_words_min = 80
+    state.page_words_max = 160
+    state.judge_history.append(verdict)
+
+    await ReviserStage(llm).run(state)
+
+    user = llm.calls[0]["user"]
+    assert "80" in user
+    assert "160" in user
+
+
+async def test_reviser_prompt_falls_back_to_default_word_bounds(fake_llm) -> None:
+    """Без разрешённых границ ревизор получает дефолтный диапазон.
+
+    Прогон без оркестратора (тест, ручная сборка состояния) не проходит через
+    разрешение границ, и пустое место в промпте означало бы «объём не задан».
+    """
+
+    verdict = JudgeVerdict(
+        passed=False,
+        issues=["Сцена страницы 2 не совпадает с текстом."],
+        problem_pages=[2],
+    )
+    revised_page = PageText(page_num=2, text="Правка текста страницы 2.")
+    revised_scene = PageScene(
+        page_num=2,
+        scene_description="Мишка у ручья.",
+        characters_in_scene=["Мишка"],
+        location="Лес",
+        objects_in_scene=[],
+    )
+    llm = fake_llm(
+        [RevisionPayload(pages=[revised_page], scenes=[revised_scene])]
+    )
+    state = _state()
+    state.judge_history.append(verdict)
+
+    await ReviserStage(llm).run(state)
+
+    user = llm.calls[0]["user"]
+    assert "60" in user
+    assert "120" in user
+
+
 async def test_reviser_rechecks_scene_refs_after_revision(fake_llm) -> None:
     """После правки ссылки сцен проверяются заново, остаток помечается."""
 

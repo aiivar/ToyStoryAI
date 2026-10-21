@@ -33,6 +33,7 @@ from app.story_pipeline.illustrations import (
 )
 from app.story_pipeline.models import Stage, StoryState
 from app.story_pipeline.observability import log_stage, total_usage
+from app.story_pipeline.page_words import validate_page_words
 from app.story_pipeline.providers.image import ImageProvider
 from app.story_pipeline.providers.llm import LLMClient
 from app.story_pipeline.settings import StorySettings
@@ -137,6 +138,10 @@ class StoryPipeline:
         # вызывающей стороны обязана исправляться здесь, а не ронять
         # прогон позже и непонятно где.
         self._resolve_illustrated_pages(state)
+        # Границы объёма страницы разрешаются здесь же и до первого этапа:
+        # сценарист и ревизор читают их из состояния, а вырожденная пара
+        # обязана отклониться до платного вызова, а не на середине прогона.
+        self._resolve_page_words(state)
         current_stage = "?"
         try:
             for stage in self._stages:
@@ -224,6 +229,51 @@ class StoryPipeline:
             source,
             list(normalized),
         )
+
+    def _resolve_page_words(self, state: StoryState) -> None:
+        """Заполнить границы объёма страницы, если их ещё нет.
+
+        Пустые поля состояния означают «границы не заданы»: берутся значения
+        настроек. Явно заданные сохраняются — это точка per-run
+        переопределения, та же, что у набора иллюстрируемых страниц.
+
+        Вырожденная пара отклоняется, а не приводится к дефолту: молчаливый
+        откат выглядел бы в `story.json` как заданный объём, и разбор прогона
+        не увидел бы, что границы были ошибочными. Отказ происходит здесь,
+        до первого платного вызова.
+        """
+
+        words_min = (
+            self._settings.story_page_words_min
+            if state.page_words_min is None
+            else state.page_words_min
+        )
+        words_max = (
+            self._settings.story_page_words_max
+            if state.page_words_max is None
+            else state.page_words_max
+        )
+        source = (
+            "настройки"
+            if state.page_words_min is None and state.page_words_max is None
+            else "вызывающая сторона"
+        )
+        validate_page_words(words_min, words_max)
+        if source == "вызывающая сторона":
+            logger.debug(
+                "pipeline: границы объёма страницы заданы прогоном: "
+                "{}..{}",
+                words_min,
+                words_max,
+            )
+        else:
+            logger.debug(
+                "pipeline: границы объёма страницы из настроек: {}..{}",
+                words_min,
+                words_max,
+            )
+        state.page_words_min = words_min
+        state.page_words_max = words_max
 
     async def _notify_stage(self, stage_name: str) -> None:
         """Сообщить о начале этапа, если колбэк передан, и не дать сбою

@@ -295,7 +295,22 @@ class DeepSeekLLMClient:
             ) from exc
 
     @staticmethod
-    def _extract_content(data: Any) -> str:
+    def _finish_reason(data: Any) -> str | None:
+        """Причина завершения генерации, если вендор её сообщил.
+
+        Отсутствует у части вендоров и у части ответов, поэтому это `None`,
+        а не пустая строка: различать «не сообщил» и «сообщил неизвестное» в
+        диагностике не нужно, а вот молча оборачивать `None` в `""` нельзя.
+        """
+
+        try:
+            reason = data["choices"][0].get("finish_reason")
+        except (KeyError, IndexError, TypeError, AttributeError):
+            return None
+        return reason if isinstance(reason, str) else None
+
+    @classmethod
+    def _extract_content(cls, data: Any) -> str:
         """Достать текст ответа из конверта Chat Completions."""
 
         try:
@@ -306,6 +321,16 @@ class DeepSeekLLMClient:
             ) from exc
         if not isinstance(content, str) or not content.strip():
             raise PermanentLLMError("DeepSeek вернул пустой ответ.")
+
+        # Обрезанный по max_tokens ответ почти всегда невалиден: говорить о
+        # нём «не соответствует схеме» значит свалить вину на модель, хотя
+        # виноват лимит токенов, и подсказать пользователю нечего. Терминология
+        # — как у соседнего клиента по тому же вендору (`toy_vision`).
+        if cls._finish_reason(data) == "length":
+            raise PermanentLLMError(
+                "DeepSeek не успел дописать ответ: он оборвался на лимите "
+                "DEEPSEEK_MAX_TOKENS."
+            )
         return content
 
     @staticmethod

@@ -8,8 +8,13 @@
 
 from __future__ import annotations
 
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.story_pipeline.page_words import (
+    DEFAULT_PAGE_WORDS_MAX,
+    DEFAULT_PAGE_WORDS_MIN,
+)
 
 # Соотношения сторон, которые принимает генератор изображений RouterAI.
 # Список зафиксирован документацией вендора: значение вне списка означало бы
@@ -60,10 +65,13 @@ class StorySettings(BaseSettings):
         description="Таймаут HTTP-запроса к DeepSeek в секундах.",
     )
     deepseek_max_tokens: int = Field(
-        default=4096,
+        default=8192,
         description=(
             "Лимит токенов ответа. У reasoning-моделей сюда входят и "
-            "токены размышлений, поэтому значение должно быть с запасом."
+            "токены размышлений, поэтому значение должно быть с запасом: "
+            "при втрое более длинном тексте страниц и STORY_PAGES_MAX = 12 "
+            "прежних 4096 хватало впритык, и обрыв выглядел бы как "
+            "«модель не выдала схему»."
         ),
     )
 
@@ -125,6 +133,23 @@ class StorySettings(BaseSettings):
             "каталог прогона получает файл на каждую страницу."
         ),
     )
+    story_page_words_min: int = Field(
+        default=DEFAULT_PAGE_WORDS_MIN,
+        description=(
+            "Минимальный объём страницы сказки в словах. Нижняя граница "
+            "измерима и проверяется кодом, поэтому «объём страницы» — не "
+            "пожелание, а величина: страница короче уходит в корректирующий "
+            "перезапрос, а если и после него — в `story.json` как деградация."
+        ),
+    )
+    story_page_words_max: int = Field(
+        default=DEFAULT_PAGE_WORDS_MAX,
+        description=(
+            "Верхняя граница объёма страницы сказки в словах. В промпте "
+            "нужна как ориентир для модели: без верхней границы страница "
+            "может вырасти в полосу текста без сцены."
+        ),
+    )
     story_max_revisions: int = Field(
         default=2,
         description="Максимум циклов ревизии «судья → ревизор → судья».",
@@ -162,6 +187,44 @@ class StorySettings(BaseSettings):
                 "(или пусто — не отправлять соотношение провайдеру)."
             )
         return stripped
+
+    @field_validator("story_page_words_min", "story_page_words_max")
+    @classmethod
+    def _check_page_words_positive(
+        cls, value: int, info: ValidationInfo
+    ) -> int:
+        """Отклонить неположительный объём страницы, назвав переменную.
+
+        Имя переменной окружения, а не поля: то, что человек правит в
+        `.env`, и есть причина отказа. Ноль и отрицательное значение не
+        имеют смысла как «объём страницы», а молчаливый откат к дефолту
+        скрыл бы опечатку до первого живого прогона.
+        """
+
+        if value < 1:
+            raise ValueError(
+                f"{info.field_name.upper()}: объём страницы должен быть "
+                f"положительным числом слов, получено {value}."
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _check_page_words_range(self) -> StorySettings:
+        """Проверить, что диапазон объёма не пуст.
+
+        `max < min` проходит проверку положительности обоих полей, но
+        означал бы, что ни одна страница не может попасть в диапазон:
+        модель получила бы невыполнимое требование и гарантированно
+        деградировала на каждом прогоне.
+        """
+
+        if self.story_page_words_max < self.story_page_words_min:
+            raise ValueError(
+                "STORY_PAGE_WORDS_MAX меньше STORY_PAGE_WORDS_MIN "
+                f"({self.story_page_words_max} < {self.story_page_words_min}): "
+                "диапазон объёма страницы пуст."
+            )
+        return self
 
 
 def get_story_settings() -> StorySettings:

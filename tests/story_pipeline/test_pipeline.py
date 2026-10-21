@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -17,9 +18,11 @@ import pytest
 from loguru import logger
 
 from app.story_pipeline import pipeline as pipeline_module
+from app.story_pipeline.artifacts import write_story_json
 from app.story_pipeline.errors import (
     PermanentImageGenerationError,
     PermanentLLMError,
+    PipelineValidationError,
     TransientImageGenerationError,
 )
 from app.story_pipeline.models import (
@@ -80,11 +83,19 @@ def _entities() -> ExtractedEntities:
 
 
 def _pages(num_pages: int) -> PagesPayload:
-    """Ответ сценариста: ровно `num_pages` страниц с нумерацией 1..N."""
+    """Ответ сценариста: ровно `num_pages` страниц нужного объёма 1..N.
+
+    Текст добивается до 70 слов: дефолтные границы объёма применяются ко всем
+    прогонам, и двухсловная страница в заготовке означала бы лишний
+    корректирующий перезапрос, которого эти тесты не проверяют.
+    """
 
     return PagesPayload(
         pages=[
-            PageText(page_num=n, text=f"Текст страницы {n}.")
+            PageText(
+                page_num=n,
+                text=f"Текст страницы {n}. " + " ".join(["слово"] * 70),
+            )
             for n in range(1, num_pages + 1)
         ]
     )
@@ -240,6 +251,203 @@ async def test_run_keeps_explicit_illustrated_pages_but_normalizes_them(
     await pipeline.run(state)
 
     assert state.illustrated_pages == [2]
+
+
+async def test_run_materializes_page_words_from_settings(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Пустые границы объёма заполняются настройками до первого этапа.
+
+    Границы разрешаются один раз в начале `run()`: их читают сценарист и
+    ревизор, а по `story.json` должно быть видно, какой объём просили.
+    """
+
+    pipeline = StoryPipeline(
+        fake_llm(_ok_responses()),
+        fake_image_provider(),
+        story_settings(
+            story_output_dir=str(tmp_path),
+            story_page_words_min=70,
+            story_page_words_max=150,
+        ),
+    )
+    state = _state(num_pages=2)
+    assert state.page_words_min is None
+    assert state.page_words_max is None
+
+    await pipeline.run(state)
+
+    assert state.page_words_min == 70
+    assert state.page_words_max == 150
+
+
+async def test_run_keeps_explicit_page_words(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Явно заданные границы не перетираются настройками прогона.
+
+    Per-run переопределение — та же точка настройки без правки `.env`, что и
+    набор иллюстрируемых страниц: пересчитывать его нельзя.
+    """
+
+    pipeline = StoryPipeline(
+        fake_llm(_ok_responses()),
+        fake_image_provider(),
+        story_settings(story_output_dir=str(tmp_path)),
+    )
+    state = _state(num_pages=2)
+    # Нижняя граница ниже объёма заготовки, иначе прогон деградировал бы
+    # не по той причине, которую проверяет тест.
+    state.page_words_min = 65
+    state.page_words_max = 180
+
+    await pipeline.run(state)
+
+    assert state.page_words_min == 65
+    assert state.page_words_max == 180
+
+
+@pytest.mark.parametrize(
+    ("words_min", "words_max"),
+    [
+        (120, 60),  # пустой диапазон
+        (0, 120),  # неположительный минимум
+        (60, 0),  # неположительный максимум
+        (-5, 120),  # отрицательный минимум
+    ],
+)
+async def test_degenerate_page_words_stop_the_run_before_any_paid_call(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+    words_min: int,
+    words_max: int,
+) -> None:
+    """Вырожденные границы отклоняются до первого обращения к модели.
+
+    Объём задаётся числом, которое нельзя «исправить по ходу»: пустой
+    диапазон означал бы, что ни одна страница не может быть верной, поэтому
+    обнаружить это надо на разборе конфигурации, а не потратив платный вызов.
+    """
+
+    llm = fake_llm(_ok_responses())
+    pipeline = StoryPipeline(
+        llm,
+        fake_image_provider(),
+        story_settings(story_output_dir=str(tmp_path)),
+    )
+    state = _state(num_pages=2)
+    state.page_words_min = words_min
+    state.page_words_max = words_max
+
+    with pytest.raises(PipelineValidationError) as failure:
+        await pipeline.run(state)
+
+    assert "STORY_PAGE_WORDS" in str(failure.value)
+    assert llm.call_count == 0
+    assert state.brief is None
+
+
+async def test_run_with_short_pages_completes_and_records_degradation(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Прогон с недобором объёма доходит до конца и попадает в `story.json`.
+
+    Мягкая деградация проверяется именно на сквозном прогоне: упади она на
+    середине, родитель потерял бы книжку целиком из-за недостающих слов на
+    одной странице — после оплаченных вызовов и сгенерированных картинок.
+    """
+
+    short = PagesPayload(
+        pages=[
+            PageText(page_num=1, text="Мишка вылез из шкафа и увидел лес."),
+            PageText(
+                page_num=2, text=" ".join(["слово"] * 70)
+            ),
+        ]
+    )
+    llm = fake_llm(
+        [
+            _brief(),
+            short,
+            short,
+            _entities(),
+            _scenes(2),
+            JudgeVerdict(passed=True, issues=[], problem_pages=[]),
+        ]
+    )
+    pipeline = StoryPipeline(
+        llm,
+        fake_image_provider(),
+        story_settings(story_output_dir=str(tmp_path)),
+    )
+    state = _state(num_pages=2)
+    state.page_words_min = 60
+    state.page_words_max = 120
+
+    result = await pipeline.run(state)
+
+    # Книжка доставлена: все страницы на месте, статус не сломан.
+    assert result.status == "ok"
+    assert [page.page_num for page in result.pages] == [1, 2]
+    assert result.short_pages == [1]
+    # Деградация видна в метрике этапа сценариста, а не спрятана в лог.
+    script_metric = next(m for m in result.metrics if m.stage == "script")
+    assert script_metric.error is not None
+    assert "1" in script_metric.error
+    # И попадает в артефакт прогона: пишет его вызывающая сторона (CLI),
+    # поэтому проверяем ровно тот путь, которым артефакт получает читатель.
+    write_story_json(str(tmp_path), result)
+    saved = json.loads(
+        (tmp_path / "story.json").read_text("utf-8")
+    )
+    assert saved["short_pages"] == [1]
+    assert saved["page_words_min"] == 60
+    assert saved["page_words_max"] == 120
+
+
+async def test_page_words_of_that_run_reach_the_screenwriter_prompt(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Промпт сценариста несёт разрешённые границы именно этого прогона.
+
+    Точка проверки одна: если бы границы брались из настроек мимо состояния,
+    пер-run переопределение молча потерялось бы, и страницы снова вышли бы
+    двухсловными.
+    """
+
+    llm = fake_llm(_ok_responses())
+    pipeline = StoryPipeline(
+        llm,
+        fake_image_provider(),
+        story_settings(story_output_dir=str(tmp_path)),
+    )
+    state = _state(num_pages=2)
+    state.page_words_min = 65
+    state.page_words_max = 135
+
+    await pipeline.run(state)
+
+    screenwriter_user = next(
+        call["user"]
+        for call in llm.calls
+        if call["schema"] is PagesPayload
+    )
+    assert "65" in screenwriter_user
+    assert "135" in screenwriter_user
 
 
 async def test_pipeline_passes_reference_photo_without_storing_it(
