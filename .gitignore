@@ -28,3 +28,5 @@ output/
 *.db-journal
 *.db.bak-*
 
+# Локальные настройки Claude Code
+.claude/settings.local.json
