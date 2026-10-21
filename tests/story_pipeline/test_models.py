@@ -32,6 +32,7 @@ from app.story_pipeline.models import (
     StageMetrics,
     StoryBrief,
     StoryState,
+    StyleReport,
 )
 
 
@@ -376,3 +377,81 @@ def test_error_taxonomy() -> None:
     # Текстовые и графические ошибки — разные ветви дерева.
     assert not issubclass(ImageGenerationError, LLMError)
     assert not issubclass(LLMError, ImageGenerationError)
+
+
+def test_narrator_defaults_to_first_person_and_rejects_unknown() -> None:
+    """Рассказчик по умолчанию — игрушка; опечатка отклоняется типами."""
+
+    state = StoryState(
+        theme="t", age=4, moral="m", started_at=datetime.now(timezone.utc)
+    )
+
+    assert state.narrator == "first_person"
+    assert state.style_profile_id is None
+    assert state.style_report is None
+
+    with pytest.raises(ValidationError):
+        StoryState(
+            theme="t",
+            age=4,
+            moral="m",
+            started_at=datetime.now(timezone.utc),
+            narrator="child",  # type: ignore[arg-type]
+        )
+
+
+def test_style_report_round_trips_through_json() -> None:
+    """Отчёт о стиле переживает JSON-цикл: по артефакту видны замеры."""
+
+    state = _full_state().model_copy(
+        update={
+            "narrator": "third_person_limited",
+            "style_profile_id": "senior",
+            "style_report": StyleReport(
+                profile_id="senior",
+                narrator="third_person_limited",
+                words=612,
+                measured={"sentence_words": 9.1, "dialogue_share": 0.15},
+                deviations=["доля реплик ниже ориентира"],
+                sufficient_sample=True,
+            ),
+        }
+    )
+
+    dumped = state.model_dump(mode="json")
+    json.dumps(dumped)
+    restored = StoryState.model_validate(dumped)
+
+    assert restored == state
+    assert dumped["style_report"]["profile_id"] == "senior"
+    assert dumped["narrator"] == "third_person_limited"
+
+
+def test_style_report_requires_sample_flag_and_isolates_deviations() -> None:
+    """Признак достаточной выборки обязателен, а список отклонений не общий."""
+
+    with pytest.raises(ValidationError):
+        StyleReport(
+            profile_id="junior",
+            narrator="first_person",
+            words=10,
+            measured={},
+        )
+
+    first = StyleReport(
+        profile_id="junior",
+        narrator="first_person",
+        words=10,
+        measured={},
+        sufficient_sample=False,
+    )
+    second = StyleReport(
+        profile_id="junior",
+        narrator="first_person",
+        words=10,
+        measured={},
+        sufficient_sample=False,
+    )
+    first.deviations.append("шум")
+
+    assert second.deviations == []

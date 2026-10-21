@@ -1197,3 +1197,81 @@ async def test_run_with_fakes_does_not_construct_network_clients(
 
     assert state.status == "ok"
     assert [art.page_num for art in state.images] == [1, 2]
+
+
+# --- Манера прогона -----------------------------------------------------
+
+
+async def test_pipeline_resolves_style_profile_and_narrator_before_stages(
+    fake_llm, fake_image_provider, story_settings, tmp_path
+) -> None:
+    """Профиль и рассказчик разрешаются до этапов и видны в состоянии."""
+
+    llm = fake_llm(_ok_responses(2))
+    pipeline = StoryPipeline(
+        llm,
+        fake_image_provider(),
+        story_settings(
+            story_output_dir=str(tmp_path),
+            story_narrator="third_person_limited",
+        ),
+    )
+
+    state = await pipeline.run(_state(2))
+
+    assert state.style_profile_id == "junior"
+    assert state.narrator == "third_person_limited"
+    # Рассказчик доехал до промпта планировщика, а не остался в настройках.
+    assert "третьем лице" in llm.calls[0]["user"]
+    # И записан в артефакт прогона вместе с профилем.
+    write_story_json(str(tmp_path), state)
+    payload = json.loads(
+        (Path(tmp_path) / "story.json").read_text(encoding="utf-8")
+    )
+    assert payload["style_profile_id"] == "junior"
+    assert payload["narrator"] == "third_person_limited"
+    assert payload["style_report"]["profile_id"] == "junior"
+    assert payload["style_report"]["narrator"] == "third_person_limited"
+
+
+async def test_explicit_narrator_on_state_wins_over_settings(
+    fake_llm, fake_image_provider, story_settings, tmp_path
+) -> None:
+    """CLI-переопределение рассказчика не перетирается настройкой."""
+
+    llm = fake_llm(_ok_responses(2))
+    pipeline = StoryPipeline(
+        llm,
+        fake_image_provider(),
+        story_settings(
+            story_output_dir=str(tmp_path),
+            story_narrator="third_person_limited",
+        ),
+    )
+    state = _state(2)
+    state.narrator = "first_person"
+
+    result = await pipeline.run(state)
+
+    assert result.narrator == "first_person"
+    assert "первого лица" in llm.calls[0]["user"]
+
+
+async def test_age_outside_style_profiles_is_rejected_before_paid_call(
+    fake_llm, fake_image_provider, story_settings, tmp_path
+) -> None:
+    """Возраст вне 3–12 отклоняется до первого платного вызова."""
+
+    llm = fake_llm(_ok_responses(2))
+    pipeline = StoryPipeline(
+        llm,
+        fake_image_provider(),
+        story_settings(story_output_dir=str(tmp_path)),
+    )
+    state = _state(2)
+    state.age = 15
+
+    with pytest.raises(PipelineValidationError):
+        await pipeline.run(state)
+
+    assert llm.call_count == 0

@@ -113,6 +113,9 @@ def run_cli(
         age=args.age,
         moral=args.moral,
         voice=args.voice,
+        # Флаг переопределяет настройку на один прогон; без флага значение
+        # берётся из окружения и остаётся настройкой прогона по умолчанию.
+        narrator=args.narrator or resolved.story_narrator,
         num_pages=args.pages,
         started_at=clock(),
     )
@@ -202,6 +205,16 @@ def _build_parser(default_pages: int) -> argparse.ArgumentParser:
         choices=("female", "male"),
         default="female",
         help="Голос озвучки: female (женский) или male (мужской).",
+    )
+    parser.add_argument(
+        "--narrator",
+        choices=("first_person", "third_person_limited"),
+        default=None,
+        help=(
+            "Рассказчик: first_person (игрушка о себе) или "
+            "third_person_limited (третье лицо с фокалом на игрушке). "
+            "Без флага берётся STORY_NARRATOR."
+        ),
     )
     return parser
 

@@ -25,7 +25,9 @@ from app.story_pipeline.models import (
     PagesPayload,
     PageText,
     StageMetrics,
+    StoryBrief,
     StoryState,
+    StyleReport,
 )
 from app.story_pipeline.illustrations import resolve_illustrated_pages
 from app.story_pipeline.page_words import (
@@ -39,16 +41,22 @@ from app.story_pipeline.prompts import (
     PAGE_NUMBERS_ONE_BASED,
     PAGE_TOO_SHORT,
     SCREENWRITER_REPAIR_USER,
+    SCREENWRITER_STYLE_REPAIR_USER,
     SCREENWRITER_SYSTEM,
     SCREENWRITER_USER,
     duplicate_page_numbers,
     format_arc_plan,
     format_illustration_plan,
     format_page_numbers,
+    format_pages,
+    format_style_deviations,
+    format_style_guide,
     render_answer_format,
 )
 from app.story_pipeline.providers.llm import LLMClient, render_schema
 from app.story_pipeline.stages._usage import add_tokens
+from app.story_pipeline.style import get_style_profile
+from app.story_pipeline.style_metrics import measure_style
 
 # Температура этапа написания сказки (см. spec story-text-generation).
 SCREENWRITER_TEMPERATURE = 0.8
@@ -147,6 +155,7 @@ class ScreenwriterStage:
         # Границы объёма приезжают в состоянии: их разрешил оркестратор один
         # раз на прогон, и тот же диапазон потом доедет до ревизора.
         words_min, words_max = resolve_page_words(state)
+        profile = get_style_profile(state.style_profile_id, state.age)
         base_user = SCREENWRITER_USER.format(
             logline=brief.logline,
             controlling_idea=brief.controlling_idea,
@@ -156,6 +165,9 @@ class ScreenwriterStage:
             age=state.age,
             words_min=words_min,
             words_max=words_max,
+            # Тот же стиль-бриф в исходном и починочном запросе: иначе
+            # исправленный текст потерял бы манеру, ради которой писался.
+            style_guide=format_style_guide(profile, state.narrator),
             # Набор иллюстрируемых страниц переносит требование визуальной
             # сцены с «каждой страницы» на конкретные номера: визуальные
             # вершины должны оказаться там, где их действительно нарисуют.
@@ -226,6 +238,40 @@ class ScreenwriterStage:
                 )
             short_problems = validate_page_length(payload.pages, words_min)
 
+        # Стиль-починка — после проверок структуры и объёма: она не должна
+        # лечить неверное число страниц, иначе одна ошибка оплачивалась бы
+        # дважды. Бюджет — один вызов на прогон, независимо от того, был ли
+        # структурный перезапрос.
+        style_report = measure_style(payload.pages, profile, state.narrator)
+        if style_report.deviations:
+            payload, attempts, prompt_tokens, completion_tokens = (
+                await self._repair_style(
+                    state=state,
+                    payload=payload,
+                    report=style_report,
+                    brief=brief,
+                    words_min=words_min,
+                    words_max=words_max,
+                    attempts=attempts,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
+            )
+
+        # Итоговый замер — по принятому тексту, а не по промежуточному: иначе
+        # артефакт показывал бы отклонения, которых после починки уже нет.
+        state.style_report = measure_style(
+            payload.pages, profile, state.narrator
+        )
+        if state.style_report.deviations:
+            logger.warning(
+                "screenwriter: манера расходится с профилем {} после "
+                "стиль-починки: {}",
+                profile.id,
+                "; ".join(state.style_report.deviations),
+            )
+
+        short_problems = validate_page_length(payload.pages, words_min)
         short_pages = _short_page_nums(payload.pages, words_min)
         state.short_pages = short_pages
         if short_problems:
@@ -247,16 +293,115 @@ class ScreenwriterStage:
                 attempts=attempts,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
-                error=(
-                    "страницы короче минимума "
-                    f"{words_min} слов даже после корректирующего перезапроса: "
-                    + "; ".join(short_problems)
-                    if short_problems
-                    else None
+                error=_degradation_note(
+                    words_min=words_min,
+                    short_problems=short_problems,
+                    style_deviations=state.style_report.deviations,
                 ),
             )
         )
         return state
+
+    async def _repair_style(
+        self,
+        *,
+        state: StoryState,
+        payload: PagesPayload,
+        report: StyleReport,
+        brief: StoryBrief,
+        words_min: int,
+        words_max: int,
+        attempts: int,
+        prompt_tokens: int | None,
+        completion_tokens: int | None,
+    ) -> tuple[PagesPayload, int, int | None, int | None]:
+        """Одна попытка стиль-починки, не роняющая прогон.
+
+        Починка адресная: модель видит конкретные расхождения и текущий
+        текст, но не полный набор ориентиров профиля — иначе она начнёт
+        вставлять тире и «наверное» ради цифр, и сцена уступит место
+        выполнению нормативов.
+
+        Неуспех любой природы — ошибка провайдера или испорченная структура
+        ответа — оставляет прежний текст: отклонения уже записаны в отчёт,
+        и отнимать у родителя книжку из-за манеры нельзя.
+        """
+
+        user = SCREENWRITER_STYLE_REPAIR_USER.format(
+            deviations=format_style_deviations(report.deviations),
+            logline=brief.logline,
+            controlling_idea=brief.controlling_idea,
+            arc_plan=format_arc_plan(brief.narrative_arc, state.num_pages),
+            pages=format_pages(payload.pages),
+            num_pages=state.num_pages,
+            words_min=words_min,
+            words_max=words_max,
+            schema=render_schema(PagesPayload),
+            answer_format=render_answer_format(PagesPayload),
+        )
+        try:
+            repaired, usage = await self._llm.complete_json(
+                system=SCREENWRITER_SYSTEM,
+                user=user,
+                schema=PagesPayload,
+                temperature=SCREENWRITER_TEMPERATURE,
+            )
+        except StoryPipelineError as exc:
+            logger.warning(
+                "screenwriter: стиль-починка не удалась, текст остаётся "
+                "прежним: {}",
+                exc,
+            )
+            return payload, attempts, prompt_tokens, completion_tokens
+
+        structure_problems = validate_page_count(
+            repaired.pages, state.num_pages
+        )
+        if structure_problems:
+            logger.warning(
+                "screenwriter: стиль-починка нарушила структуру страниц, "
+                "текст остаётся прежним: {}",
+                "; ".join(structure_problems),
+            )
+            return payload, attempts, prompt_tokens, completion_tokens
+
+        logger.debug(
+            "screenwriter: стиль-починка применена ({} слова)",
+            sum(count_words(page.text) for page in repaired.pages),
+        )
+        return (
+            repaired,
+            attempts + 1,
+            add_tokens(prompt_tokens, usage.prompt_tokens),
+            add_tokens(completion_tokens, usage.completion_tokens),
+        )
+
+
+def _degradation_note(
+    *,
+    words_min: int,
+    short_problems: list[str],
+    style_deviations: list[str],
+) -> str | None:
+    """Собрать пометку о деградации для метрики этапа.
+
+    Оба вида деградации не роняют прогон, но обязаны быть видны разбору:
+    недобор объёма и расхождение с манерой — разные причины, поэтому идут
+    одной строкой с явными подписями, а не смешиваются.
+    """
+
+    notes: list[str] = []
+    if short_problems:
+        notes.append(
+            f"страницы короче минимума {words_min} слов даже после "
+            "корректирующего перезапроса: " + "; ".join(short_problems)
+        )
+    if style_deviations:
+        notes.append(
+            "манера расходится с ориентирами профиля: "
+            + "; ".join(style_deviations)
+        )
+    return "; ".join(notes) if notes else None
 
 
 def _short_page_nums(pages: list[PageText], words_min: int) -> list[int]:

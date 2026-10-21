@@ -8,10 +8,12 @@
 
 from __future__ import annotations
 
+from typing import get_args
+
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.story_pipeline.models import Voice
+from app.story_pipeline.models import Narrator, Voice
 from app.story_pipeline.page_words import (
     DEFAULT_PAGE_WORDS_MAX,
     DEFAULT_PAGE_WORDS_MIN,
@@ -206,6 +208,15 @@ class StorySettings(BaseSettings):
         default=2,
         description="Максимум циклов ревизии «судья → ревизор → судья».",
     )
+    story_narrator: Narrator = Field(
+        default="first_person",
+        description=(
+            "Рассказчик сказки: `first_person` (игрушка сама себя "
+            "представляет) или `third_person_limited` (третье лицо с фокалом "
+            "на игрушке). Параметр запуска `--narrator` переопределяет его "
+            "на один прогон."
+        ),
+    )
     story_age_min: int = Field(
         default=3,
         description="Минимальный целевой возраст читателя.",
@@ -257,6 +268,24 @@ class StorySettings(BaseSettings):
             raise ValueError(
                 f"{info.field_name.upper()}: объём страницы должен быть "
                 f"положительным числом слов, получено {value}."
+            )
+        return value
+
+    @field_validator("story_narrator", mode="before")
+    @classmethod
+    def _check_narrator(cls, value: str, info: ValidationInfo) -> str:
+        """Отклонить неизвестного рассказчика, назвав переменную окружения.
+
+        Literal сам отклонит опечатку, но сообщение будет перечислять
+        значения без имени переменной; человек, правящий `.env`, должен
+        сразу видеть, что именно он испортил.
+        """
+
+        allowed = get_args(Narrator)
+        if value not in allowed:
+            raise ValueError(
+                f"{info.field_name.upper()}: неизвестный рассказчик "
+                f"{value!r}. Допустимые значения: {', '.join(allowed)}."
             )
         return value
 

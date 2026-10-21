@@ -26,10 +26,12 @@ from pydantic.fields import FieldInfo
 from app.story_pipeline.models import (
     ExtractedEntities,
     NarrativeArc,
+    Narrator,
     PageScene,
     PageText,
     SceneRefViolation,
 )
+from app.story_pipeline.style import StyleProfile
 
 # Единый художественный стиль иллюстраций. Подставляется в каждый промпт
 # изображения как якорь визуальной согласованности между страницами.
@@ -223,13 +225,106 @@ PLANNER_SYSTEM = (
     "только валидным JSON без markdown-обёрток и пояснений."
 )
 
-# Плейсхолдеры: theme, age, moral, schema (рендер схемы StoryBrief),
-# answer_format (строгая форма ответа `render_answer_format(StoryBrief)`).
+# --- Блоки манеры ------------------------------------------------------
+#
+# Формулировки живут здесь, а данные профиля — в `style.py`: промпт остаётся
+# в одном файле, профиль остаётся данными. Плейсхолдеры: opening (как звучит
+# выбранный рассказчик), techniques (приёмы списком), prohibitions (запреты
+# списком), sentence_low/sentence_high (длина фразы), dialogue_low/
+# dialogue_high (доля реплик в процентах), dim_low/dim_high (диминутивы на
+# 1000 слов).
+STYLE_BRIEF = (
+    "МАНЕРА ПОВЕСТВОВАНИЯ (обязательно):\n"
+    "{opening}\n"
+    "Структура истории:\n{techniques}\n"
+    "Запреты:\n{prohibitions}"
+)
+
+# Языковые ориентиры даны описательно, а не таблицей нормативов: иначе модель
+# начинает вставлять тире и «наверное» ради цифр, и сцена уступает место
+# выполнению плана. Цифры здесь — порядок величины, а не заказ.
+STYLE_GUIDE = (
+    "МАНЕРА ПОВЕСТВОВАНИЯ (обязательно):\n"
+    "{opening}\n"
+    "Язык:\n"
+    "- фраза короткая: в среднем {sentence_low}–{sentence_high} слов, как в "
+    "устном рассказе, а не литературный период;\n"
+    "- диалог — двигатель сцены: {dialogue_low}–{dialogue_high} % фраз — "
+    "реплики, атрибуция только для смены говорящего;\n"
+    "- диминутивы ({dim_low}–{dim_high} на 1000 слов) и модальные оговорки "
+    "(«наверное», «просто», «конечно») принадлежат речи персонажей, не "
+    "автору;\n"
+    "- на эмоциональную сцену — одна деталь тела и одна деталь среды; "
+    "чувство не называть;\n"
+    "- ритм задают короткие фразы и многоточия, но они не заменяют сцену.\n"
+    "Запреты:\n{prohibitions}"
+)
+
+# Пятый критерий судьи. Список нарушений закрытый: стилистическая вычитка в
+# петле ревизии означала бы переписывание ради вкуса судьи и рост цены
+# прогона, поэтому всё, что не перечислено, нарушением не считается.
+STYLE_JUDGE_CRITERION = (
+    "5. Манера повествования: {opening} Грубым нарушением считаются только: "
+    "герой не представлен в начале; мораль проговорена выводом или "
+    "нравоучением; нет малого поступка с репутационной ценой (герой спасает "
+    "мир или решает чужую глобальную задачу); эмоция названа словом вместо "
+    "показанной. Стилистические придирки нарушением не считаются."
+)
+
+
+def _bullet_list(items: tuple[str, ...]) -> str:
+    """Собрать требования профиля в список для промпта."""
+
+    return "\n".join(f"- {item}" for item in items)
+
+
+def _number(value: float) -> str:
+    """Записать ориентир без хвоста `.0`, чтобы промпт не выглядел формулой."""
+
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
+def format_style_brief(profile: StyleProfile, narrator: Narrator) -> str:
+    """Блок структуры истории для планировщика."""
+
+    return STYLE_BRIEF.format(
+        opening=profile.openings[narrator],
+        techniques=_bullet_list(profile.techniques),
+        prohibitions=_bullet_list(profile.prohibitions),
+    )
+
+
+def format_style_guide(profile: StyleProfile, narrator: Narrator) -> str:
+    """Блок языка и запретов для сценариста и ревизора."""
+
+    norms = profile.norms
+    return STYLE_GUIDE.format(
+        opening=profile.openings[narrator],
+        sentence_low=_number(norms.sentence_words[0]),
+        sentence_high=_number(norms.sentence_words[1]),
+        dialogue_low=_number(norms.dialogue_share[0] * 100),
+        dialogue_high=_number(norms.dialogue_share[1] * 100),
+        dim_low=_number(norms.diminutives_per_1000[0]),
+        dim_high=_number(norms.diminutives_per_1000[1]),
+        prohibitions=_bullet_list(profile.prohibitions),
+    )
+
+
+def format_style_criterion(profile: StyleProfile, narrator: Narrator) -> str:
+    """Пятый критерий судьи под выбранного рассказчика."""
+
+    return STYLE_JUDGE_CRITERION.format(opening=profile.openings[narrator])
+
+
+# Плейсхолдеры: theme, age, moral, style_brief (блок манеры), schema (рендер
+# схемы StoryBrief), answer_format (строгая форма ответа
+# `render_answer_format(StoryBrief)`).
 PLANNER_USER = (
     "Составь план детской сказки.\n"
     "Тема: {theme}.\n"
     "Целевой возраст ребёнка: {age} лет.\n"
     "Мораль: {moral}.\n\n"
+    "{style_brief}\n\n"
     "Требования к плану:\n"
     "- главный герой — именно та игрушка, которая описана в теме. Не подменяй "
     "её другим зверем, машинкой, куклой или человеком и не добавляй ей вид, "
@@ -251,9 +346,10 @@ SCREENWRITER_SYSTEM = (
 )
 
 # Плейсхолдеры: logline, controlling_idea, character_arc, arc_plan,
-# num_pages, age, words_min, words_max, illustration_plan (блок про
-# иллюстрируемые страницы), schema (рендер схемы PagesPayload), answer_format
-# (строгая форма ответа `render_answer_format(PagesPayload)`).
+# num_pages, age, words_min, words_max, style_guide (блок языка и запретов),
+# illustration_plan (блок про иллюстрируемые страницы), schema (рендер схемы
+# PagesPayload), answer_format (строгая форма ответа
+# `render_answer_format(PagesPayload)`).
 #
 # Требование иллюстрируемости вынесено из общего текста в подстановку
 # `illustration_plan`: у набора, равного всем страницам, и у ограниченного
@@ -277,6 +373,7 @@ SCREENWRITER_USER = (
     "На каждой странице {words_min}–{words_max} слов с сенсорными деталями — "
     "что герой видит, слышит и чувствует. Используй лексику, доступную "
     "ребёнку {age} лет.\n\n"
+    "{style_guide}\n\n"
     "{illustration_plan}\n\n"
     "Верни ответ строго по JSON-схеме:\n{schema}\n{answer_format}"
 )
@@ -339,6 +436,29 @@ SCREENWRITER_REPAIR_USER = (
     "Текст каждой страницы перепиши в {words_min}–{words_max} слов: если "
     "страница недотягивает, развей её новыми сценами и деталями, а не "
     "сокращай другие страницы."
+)
+
+# Плейсхолдеры: deviations (грубые расхождения замеров), logline,
+# controlling_idea, arc_plan, pages (текущий текст страниц), num_pages,
+# words_min, words_max, schema (рендер схемы PagesPayload), answer_format.
+#
+# Полный набор ориентиров профиля сюда намеренно НЕ передаётся: отклонения
+# уже названы адресно, а повторная таблица норм превратила бы починку в
+# выполнение нормативов вместо правки ритма и речи персонажей.
+SCREENWRITER_STYLE_REPAIR_USER = (
+    "Сказка написана не в той манере. Что именно расходится:\n"
+    "{deviations}\n\n"
+    "Замысел:\n"
+    "Логлайн: {logline}\n"
+    "Главная мысль: {controlling_idea}\n"
+    "Нарративная арка и привязка страниц к её битам:\n{arc_plan}\n\n"
+    "Текущий текст страниц:\n{pages}\n\n"
+    "Перепиши сказку, устранив эти расхождения и сохранив манеру там, где "
+    "она уже есть. Сохрани ровно {num_pages} страниц с нумерацией "
+    "1..{num_pages}, объём {words_min}–{words_max} слов на страницу, порядок "
+    "событий арки и действие каждой сцены. Не вставляй слова и знаки ради "
+    "выполнения нормы: правь ритм фразы и речь персонажей.\n\n"
+    "Верни ответ строго по JSON-схеме:\n{schema}\n{answer_format}"
 )
 
 
@@ -515,6 +635,32 @@ NO_ENTITY_REGISTRY_PLACEHOLDER = (
 )
 
 
+# --- Стиль: формулировки отклонений -------------------------------------
+#
+# Отклонения уходят в `story.json`, в лог и в стиль-починку сценариста,
+# поэтому их текст живёт здесь, рядом с остальными обращениями к модели,
+# а не в модуле измерений.
+
+# Плейсхолдеры: label (что измеряли), value (фактическое значение),
+# low (нижняя граница ориентира).
+STYLE_DEVIATION_BELOW = "{label}: {value} — ниже ориентира {low}."
+
+# Плейсхолдеры: label, value, high (верхняя граница ориентира).
+STYLE_DEVIATION_ABOVE = "{label}: {value} — выше ориентира {high}."
+
+# Названия замеров: ключ совпадает с ключом отчёта, чтобы подпись и значение
+# не могли разойтись при добавлении нового замера.
+STYLE_METRIC_LABELS = {
+    "sentence_words": "средняя длина фразы в словах",
+    "dialogue_share": "доля реплик в предложениях",
+    "diminutives_per_1000": "диминутивы на 1000 слов",
+    "modality_per_1000": "модальные оговорки на 1000 слов",
+    "ellipsis_per_1000": "многоточия на 1000 слов",
+    "short_sentence_share": "доля фраз из одного–двух слов",
+    "attribution_per_1000": "атрибуция речи на 1000 слов",
+}
+
+
 # --- Этап судьи --------------------------------------------------------
 
 JUDGE_SYSTEM = (
@@ -525,9 +671,9 @@ JUDGE_SYSTEM = (
 
 # Плейсхолдеры: logline, controlling_idea, arc_plan, age, story
 # (текст и сцены страниц), toy_description (описание игрушки-героя),
-# entities (реестр сущностей с описаниями), schema (рендер схемы
-# JudgeVerdict), answer_format (строгая форма ответа
-# `render_answer_format(JudgeVerdict)`).
+# entities (реестр сущностей с описаниями), style_criterion (пятый критерий
+# манеры под выбранного рассказчика), schema (рендер схемы JudgeVerdict),
+# answer_format (строгая форма ответа `render_answer_format(JudgeVerdict)`).
 JUDGE_USER = (
     "Замысел сказки:\n"
     "Логлайн: {logline}\n"
@@ -538,7 +684,7 @@ JUDGE_USER = (
     "{toy_description}\n\n"
     "Реестр сущностей сказки:\n{entities}\n\n"
     "Текст и сцены страниц:\n{story}\n\n"
-    "Проверь сказку по четырём критериям:\n"
+    "Проверь сказку по пяти критериям:\n"
     "1. Соответствие текста и сцены: каждая сцена точно отражает то, что "
     "происходит в тексте своей страницы; герои, место и действие совпадают.\n"
     "2. Нарративная целостность: в истории присутствуют завязка, "
@@ -548,7 +694,8 @@ JUDGE_USER = (
     "4. Согласованность описания героя: то, как герой описан в тексте "
     "страниц, не противоречит его визуальному описанию в реестре сущностей и "
     "описанию игрушки; если текст называет героя иначе или приписывает ему "
-    "чужой вид, цвет или наряд, это нарушение.\n\n"
+    "чужой вид, цвет или наряд, это нарушение.\n"
+    "{style_criterion}\n\n"
     "Если хотя бы один критерий нарушен, верни passed=false и заполни "
     "problem_pages номерами страниц, к которым относится проблема. Если "
     "нарушений нет, верни passed=true и пустой список problem_pages. "
@@ -565,11 +712,11 @@ REVISER_SYSTEM = (
     "валидным JSON без markdown-обёрток и пояснений."
 )
 
-# Плейсхолдеры: logline, controlling_idea, character_arc, issues,
-# problem_context (текст и текущая сцена проблемных страниц), words_min,
-# words_max (границы объёма страницы этого прогона), schema (рендер схемы
-# RevisionPayload), answer_format (строгая форма ответа
-# `render_answer_format(RevisionPayload)`).
+# Плейсхолдеры: logline, controlling_idea, character_arc, style_guide (блок
+# языка и запретов), issues, problem_context (текст и текущая сцена
+# проблемных страниц), words_min, words_max (границы объёма страницы этого
+# прогона), schema (рендер схемы RevisionPayload), answer_format (строгая
+# форма ответа `render_answer_format(RevisionPayload)`).
 #
 # Границы объёма достаются ревизору по той же причине, что и сценаристу: без
 # них «устрани замечание» читается как «сократи до сути», и правка отменяет
@@ -580,6 +727,7 @@ REVISER_USER = (
     "Логлайн: {logline}\n"
     "Главная мысль: {controlling_idea}\n"
     "Изменение героя: {character_arc}\n\n"
+    "{style_guide}\n\n"
     "Замечания судьи, которые нужно устранить:\n{issues}\n\n"
     "Проблемные страницы (текст и текущая сцена):\n{problem_context}\n\n"
     "Перепиши ТОЛЬКО эти проблемные страницы так, чтобы каждое замечание "
@@ -593,6 +741,12 @@ REVISER_USER = (
     "берутся только из реестра сущностей.\n\n"
     "Верни ответ строго по JSON-схеме:\n{schema}\n{answer_format}"
 )
+
+
+def format_style_deviations(deviations: list[str]) -> str:
+    """Собрать отклонения манеры в список для починочного запроса."""
+
+    return "\n".join(f"- {item}" for item in deviations)
 
 
 def format_page_numbers(numbers: list[int]) -> str:

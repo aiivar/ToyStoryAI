@@ -25,10 +25,12 @@ from app.story_pipeline.prompts import (
     format_arc_plan,
     format_optional_entity_registry,
     format_scene_pages,
+    format_style_criterion,
     format_toy_description,
     render_answer_format,
 )
 from app.story_pipeline.providers.llm import LLMClient, render_schema
+from app.story_pipeline.style import get_style_profile
 
 # Температура этапа судейства: вердикт должен быть воспроизводимым.
 JUDGE_TEMPERATURE = 0.0
@@ -87,6 +89,10 @@ class JudgeStage:
             toy_description=format_toy_description(state.toy_description),
             entities=format_optional_entity_registry(state.entities),
             story=format_scene_pages(state.scenes, state.pages),
+            style_criterion=format_style_criterion(
+                get_style_profile(state.style_profile_id, state.age),
+                state.narrator,
+            ),
             schema=render_schema(JudgeVerdict),
             answer_format=render_answer_format(JudgeVerdict),
         )

@@ -426,8 +426,10 @@ async def test_schema_correction_prompt_constrains_answer_shape(
         format_arc_plan,
         format_optional_entity_registry,
         format_scene_pages,
+        format_style_criterion,
         format_toy_description,
     )
+    from app.story_pipeline.style import JUNIOR
 
     base = JUDGE_USER.format(
         logline="логлайн",
@@ -437,6 +439,7 @@ async def test_schema_correction_prompt_constrains_answer_shape(
         toy_description=format_toy_description(None),
         entities=format_optional_entity_registry(None),
         story=format_scene_pages([], []),
+        style_criterion=format_style_criterion(JUNIOR, "first_person"),
         schema="{}",
         answer_format=render_answer_format(JudgeVerdict),
     )

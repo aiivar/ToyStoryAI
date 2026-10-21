@@ -390,6 +390,7 @@ cp .env.example .env
 | `STORY_PAGE_WORDS_MIN` | Минимальный объём страницы сказки в словах | `60` |
 | `STORY_PAGE_WORDS_MAX` | Максимальный объём страницы сказки в словах | `120` |
 | `STORY_MAX_REVISIONS` | Лимит циклов ревизии «судья → ревизор» | `2` |
+| `STORY_NARRATOR` | Рассказчик: `first_person` (игрушка о себе) или `third_person_limited` | `first_person` |
 | `STORY_AGE_MIN` | Минимальный целевой возраст | `3` |
 | `STORY_AGE_MAX` | Максимальный целевой возраст | `6` |
 | `STORY_OUTPUT_DIR` | Каталог результатов прогона | `output` |

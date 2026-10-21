@@ -14,6 +14,7 @@ from loguru import logger
 from app.story_pipeline.errors import (
     PipelineValidationError,
     StoryPipelineError,
+    TransientLLMError,
 )
 from app.story_pipeline.models import (
     NarrativeArc,
@@ -59,6 +60,19 @@ def _state(num_pages: int = 6, illustrated: list[int] | None = None) -> StorySta
     )
 
 
+def _with_style_repair(*responses):
+    """Дополнить очередь ответов повтором последнего: стиль-починка.
+
+    Заготовки страниц намеренно написаны ровным текстом без реплик и
+    модальных оговорок, поэтому замеры манеры расходятся с профилем и
+    сценарист делает один стиль-вызов. Повтор последнего ответа сохраняет
+    структуру страниц: тест проверяет то, ради чего написан, а не манеру.
+    """
+
+    items = list(responses)
+    return [*items, items[-1]]
+
+
 def _pages(nums: list[int]) -> PagesPayload:
     """Ответ сценариста: страницы нужного объёма с заданными номерами.
 
@@ -85,7 +99,7 @@ def _filler(total: int) -> str:
 async def test_screenwriter_stores_pages_sorted_by_number(fake_llm) -> None:
     """Ровно N страниц из ответа кладутся в `state.pages` по порядку номеров."""
 
-    llm = fake_llm([_pages([3, 1, 5, 2, 6, 4])])
+    llm = fake_llm(_with_style_repair(_pages([3, 1, 5, 2, 6, 4])))
     stage = ScreenwriterStage(llm)
     state = _state(num_pages=6)
 
@@ -94,7 +108,8 @@ async def test_screenwriter_stores_pages_sorted_by_number(fake_llm) -> None:
     assert result is state
     assert [page.page_num for page in state.pages] == [1, 2, 3, 4, 5, 6]
     assert state.pages[0].text.startswith("Текст страницы 1.")
-    assert llm.call_count == 1
+    # Второй вызов — стиль-починка: заготовка не попадает в ориентиры манеры.
+    assert llm.call_count == 2
     assert llm.calls[0]["schema"] is PagesPayload
     assert llm.calls[0]["temperature"] == 0.8
 
@@ -102,7 +117,7 @@ async def test_screenwriter_stores_pages_sorted_by_number(fake_llm) -> None:
 async def test_screenwriter_prompt_binds_pages_to_arc(fake_llm) -> None:
     """Промпт несёт число страниц, биты арки с диапазонами и требования к тексту."""
 
-    llm = fake_llm([_pages([1, 2, 3, 4, 5, 6])])
+    llm = fake_llm(_with_style_repair(_pages([1, 2, 3, 4, 5, 6])))
     stage = ScreenwriterStage(llm)
     state = _state(num_pages=6)
 
@@ -143,7 +158,7 @@ async def test_prompt_names_illustrated_pages_and_calls_others_transitions(
     страницами, иначе книжка рисуется не там, где драма.
     """
 
-    llm = fake_llm([_pages([1, 2, 3, 4, 5, 6])])
+    llm = fake_llm(_with_style_repair(_pages([1, 2, 3, 4, 5, 6])))
 
     await ScreenwriterStage(llm).run(_state(6, illustrated=[1, 4, 6]))
 
@@ -158,7 +173,7 @@ async def test_prompt_names_illustrated_pages_and_calls_others_transitions(
 async def test_prompt_keeps_all_pages_illustratable_on_full_set(fake_llm) -> None:
     """При полном наборе остаётся нынешнее требование ко всем страницам."""
 
-    llm = fake_llm([_pages([1, 2, 3, 4, 5, 6])])
+    llm = fake_llm(_with_style_repair(_pages([1, 2, 3, 4, 5, 6])))
 
     await ScreenwriterStage(llm).run(_state(6, illustrated=[1, 2, 3, 4, 5, 6]))
 
@@ -171,7 +186,7 @@ async def test_prompt_keeps_all_pages_illustratable_on_full_set(fake_llm) -> Non
 async def test_prompt_without_set_in_state_asks_for_all_pages(fake_llm) -> None:
     """Пустое поле — «набор не задан», то есть иллюстрируются все страницы."""
 
-    llm = fake_llm([_pages([1, 2, 3, 4, 5, 6])])
+    llm = fake_llm(_with_style_repair(_pages([1, 2, 3, 4, 5, 6])))
     state = _state(6)
     assert state.illustrated_pages == []
 
@@ -187,11 +202,12 @@ async def test_repair_request_carries_the_same_illustrated_set(fake_llm) -> None
     в первой попытке — единственное место, где модель о нём узнаёт.
     """
 
-    llm = fake_llm([_pages([1, 2, 3]), _pages([1, 2, 3, 4, 5, 6])])
+    llm = fake_llm(_with_style_repair(_pages([1, 2, 3]), _pages([1, 2, 3, 4, 5, 6])))
 
     await ScreenwriterStage(llm).run(_state(6, illustrated=[1, 4, 6]))
 
-    assert llm.call_count == 2
+    # Второй вызов — структурный перезапрос, третий — стиль-починка.
+    assert llm.call_count == 3
     repair_user = llm.calls[1]["user"]
     assert "1, 4, 6" in repair_user
     assert "связк" in repair_user
@@ -201,7 +217,7 @@ async def test_repair_request_carries_the_same_illustrated_set(fake_llm) -> None
 async def test_repair_request_keeps_full_set_wording(fake_llm) -> None:
     """При полном наборе починочный запрос говорит то же, что и исходный."""
 
-    llm = fake_llm([_pages([1, 2, 3]), _pages([1, 2, 3, 4, 5, 6])])
+    llm = fake_llm(_with_style_repair(_pages([1, 2, 3]), _pages([1, 2, 3, 4, 5, 6])))
 
     await ScreenwriterStage(llm).run(_state(6, illustrated=[1, 2, 3, 4, 5, 6]))
 
@@ -233,7 +249,7 @@ async def test_prompt_carries_run_word_bounds(fake_llm) -> None:
     Число слов, наоборот, можно посчитать кодом и проверить.
     """
 
-    llm = fake_llm([_pages([1, 2, 3, 4, 5, 6])])
+    llm = fake_llm(_with_style_repair(_pages([1, 2, 3, 4, 5, 6])))
 
     await ScreenwriterStage(llm).run(_state_with_bounds(6, 70, 150))
 
@@ -251,7 +267,7 @@ async def test_prompt_uses_default_bounds_when_state_has_none(fake_llm) -> None:
     проходят через разрешение границ, поэтому дефолтный запас обязателен.
     """
 
-    llm = fake_llm([_pages([1, 2, 3, 4, 5, 6])])
+    llm = fake_llm(_with_style_repair(_pages([1, 2, 3, 4, 5, 6])))
 
     await ScreenwriterStage(llm).run(_state())
 
@@ -271,7 +287,7 @@ async def test_repair_request_carries_both_bounds_and_illustrated_set(
     то есть вторая попытка испортит то, что исправляла.
     """
 
-    llm = fake_llm([_pages([1, 2, 3]), _pages([1, 2, 3, 4, 5, 6])])
+    llm = fake_llm(_with_style_repair(_pages([1, 2, 3]), _pages([1, 2, 3, 4, 5, 6])))
 
     await ScreenwriterStage(llm).run(
         _state_with_bounds(6, 70, 150, illustrated=[1, 4, 6])
@@ -429,14 +445,15 @@ def test_validate_page_length_reports_every_short_page() -> None:
 async def test_screenwriter_repairs_wrong_page_count_once(fake_llm) -> None:
     """Неверное число страниц вызывает ровно один перезапрос и правку."""
 
-    llm = fake_llm([_pages([1, 2, 3]), _pages([1, 2, 3, 4, 5, 6])])
+    llm = fake_llm(_with_style_repair(_pages([1, 2, 3]), _pages([1, 2, 3, 4, 5, 6])))
     stage = ScreenwriterStage(llm)
     state = _state(num_pages=6)
 
     await stage.run(state)
 
     assert [page.page_num for page in state.pages] == [1, 2, 3, 4, 5, 6]
-    assert llm.call_count == 2
+    # Три вызова: исходный, структурный перезапрос и стиль-починка.
+    assert llm.call_count == 3
     # Перезапрос идёт с тем же system и несёт описание проблем исходного ответа.
     assert llm.calls[1]["system"] == llm.calls[0]["system"]
     repair_user = llm.calls[1]["user"]
@@ -445,10 +462,10 @@ async def test_screenwriter_repairs_wrong_page_count_once(fake_llm) -> None:
     assert "3" in repair_user
 
     metric = state.metrics[-1]
-    assert metric.attempts == 2
-    # Токены обеих попыток суммируются (11 + 11, 22 + 22).
-    assert metric.prompt_tokens == 22
-    assert metric.completion_tokens == 44
+    assert metric.attempts == 3
+    # Токены всех попыток суммируются (11 × 3, 22 × 3).
+    assert metric.prompt_tokens == 33
+    assert metric.completion_tokens == 66
 
 
 async def test_screenwriter_raises_error_when_repair_fails(fake_llm) -> None:
@@ -637,3 +654,162 @@ async def test_screenwriter_requires_brief(fake_llm) -> None:
         await stage.run(state)
 
     assert llm.call_count == 0
+
+
+# --- Стиль-починка -------------------------------------------------------
+
+# Текст, который попадает в ориентиры младшего профиля: короткие фразы,
+# диалог-двигатель, диминутивы и модальные оговорки в речи персонажей.
+# Нужен, чтобы проверить обратный случай — починка не должна запускаться.
+_STYLED_NARRATION = (
+    "Мишка вышел во двор и тихо улыбнулся.",
+    "Он сел на ступень у крыльца и стал ждать.",
+    "Ветер шуршал листвой, и казалось, что кто-то идёт рядом.",
+    "Небо над крышей стало розовым и очень тёплым.",
+    "Он слушал, как шумит листва, и тихо радовался.",
+    "Он встал и пошёл по дорожке к дому.",
+    "Дорожка была мокрой после утреннего дождя.",
+    "В траве блестели капли, и пахло сырой землёй.",
+    "Он остановился и посмотрел на своё отражение.",
+    "В луже плавало небо, и это было смешно.",
+    "Он пожал плечами и пошёл дальше по дорожке.",
+    "У калитки его встретил старый пёс.",
+    "Пёс вилял хвостом и радостно смотрел на него.",
+    "Они вместе вошли в дом и сели у окна.",
+    "За окном шумел дождь, и было очень тихо.",
+    "Он слушал дождь и думал о завтрашнем дне.",
+    "Дом был тёплым, и в нём пахло чаем.",
+)
+
+_STYLED_DIALOGUES = (
+    "— Наверное, зайчик, пойдём домой.",
+    "— А дальше?",
+    "— Пойдём скорее домой, пока не стемнело.",
+    "— Ты слышишь, как шумит дождь?",
+    "— Да.",
+    "— Тогда пойдём спать.",
+)
+
+
+def _styled_text() -> str:
+    """Текст в ориентирах младшего профиля (≈280 слов, без отклонений)."""
+
+    sentences: list[str] = []
+    dialogue_index = 0
+    for index in range(40):
+        if index % 6 == 5 and dialogue_index < len(_STYLED_DIALOGUES):
+            sentences.append(_STYLED_DIALOGUES[dialogue_index])
+            dialogue_index += 1
+        else:
+            sentences.append(_STYLED_NARRATION[(index * 3) % len(_STYLED_NARRATION)])
+    text = " ".join(sentences)
+    text = text.replace(
+        "Небо над крышей стало розовым и очень тёплым.",
+        "Небо над крышей стало розовым и очень тёплым…",
+        1,
+    )
+    text = text.replace(
+        "В луже плавало небо, и это было смешно.",
+        "В луже плавало небо, и это было смешно…",
+        1,
+    )
+    return text
+
+
+def _styled_pages(nums: list[int]) -> PagesPayload:
+    """Ответ сценариста, который не расходится с ориентирами манеры."""
+
+    return PagesPayload(
+        pages=[PageText(page_num=n, text=_styled_text()) for n in nums]
+    )
+
+
+async def test_style_repair_is_not_called_when_text_matches_profile(
+    fake_llm,
+) -> None:
+    """Соблюдение ориентиров не оплачивается лишним вызовом модели."""
+
+    llm = fake_llm([_styled_pages([1])])
+    state = _state(num_pages=1)
+
+    await ScreenwriterStage(llm).run(state)
+
+    assert llm.call_count == 1
+    assert state.style_report is not None
+    assert state.style_report.deviations == []
+    assert state.style_report.sufficient_sample is True
+    assert state.metrics[-1].error is None
+
+
+async def test_style_repair_is_called_once_on_gross_deviation(fake_llm) -> None:
+    """Грубое расхождение вызывает ровно одну стиль-починку."""
+
+    llm = fake_llm([_pages([1, 2, 3, 4, 5, 6])] * 2)
+    state = _state(num_pages=6)
+
+    await ScreenwriterStage(llm).run(state)
+
+    assert llm.call_count == 2
+    repair_user = llm.calls[1]["user"]
+    # В запрос уходят конкретные отклонения и текущий текст страниц.
+    assert "не в той манере" in repair_user
+    assert "длина фразы" in repair_user
+    assert "Текст страницы 1." in repair_user
+    # Полный перечень ориентиров повторно не передаётся: иначе модель
+    # начнёт выполнять нормативы вместо правки ритма.
+    assert "фраза короткая" not in repair_user
+    assert "12–19" not in repair_user
+    # Замеры и деградация видны в артефакте и метрике.
+    assert state.style_report is not None
+    assert state.style_report.deviations
+    assert "манера расходится" in (state.metrics[-1].error or "")
+
+
+async def test_style_repair_keeps_previous_text_on_broken_structure(
+    fake_llm,
+) -> None:
+    """Починка, сломавшая структуру страниц, не применяется."""
+
+    broken = PagesPayload(pages=[PageText(page_num=1, text=_styled_text())])
+    llm = fake_llm([_pages([1, 2, 3, 4, 5, 6]), broken])
+    state = _state(num_pages=6)
+
+    await ScreenwriterStage(llm).run(state)
+
+    assert [page.page_num for page in state.pages] == [1, 2, 3, 4, 5, 6]
+    assert llm.call_count == 2
+    assert state.style_report is not None
+    assert state.style_report.deviations
+
+
+async def test_style_repair_failure_is_not_fatal(fake_llm) -> None:
+    """Сбой починки оставляет прежний текст, книжка не теряется."""
+
+    llm = fake_llm(
+        [
+            _pages([1, 2, 3, 4, 5, 6]),
+            TransientLLMError("провайдер недоступен"),
+        ]
+    )
+    state = _state(num_pages=6)
+
+    result = await ScreenwriterStage(llm).run(state)
+
+    assert result is state
+    assert [page.page_num for page in state.pages] == [1, 2, 3, 4, 5, 6]
+    assert state.status == "ok"
+    assert state.style_report is not None
+    assert state.style_report.deviations
+    assert state.metrics[-1].error is not None
+
+
+async def test_style_repair_is_not_repeated_after_failure(fake_llm) -> None:
+    """Бюджет — один вызов на прогон: повторной починки нет."""
+
+    llm = fake_llm([_pages([1, 2, 3, 4, 5, 6])] * 2)
+    state = _state(num_pages=6)
+
+    await ScreenwriterStage(llm).run(state)
+
+    # Третьего вызова нет, даже если отклонения остались.
+    assert llm.call_count == 2

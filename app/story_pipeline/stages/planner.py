@@ -13,9 +13,11 @@ from app.story_pipeline.models import StageMetrics, StoryBrief, StoryState
 from app.story_pipeline.prompts import (
     PLANNER_SYSTEM,
     PLANNER_USER,
+    format_style_brief,
     render_answer_format,
 )
 from app.story_pipeline.providers.llm import LLMClient, render_schema
+from app.story_pipeline.style import get_style_profile
 
 # Температура этапа планирования (см. spec story-text-generation).
 PLANNER_TEMPERATURE = 0.7
@@ -33,10 +35,12 @@ class PlannerStage:
         """Запросить бриф по схеме `StoryBrief` и записать его в состояние."""
 
         started = time.perf_counter()
+        profile = get_style_profile(state.style_profile_id, state.age)
         user = PLANNER_USER.format(
             theme=state.theme,
             age=state.age,
             moral=state.moral,
+            style_brief=format_style_brief(profile, state.narrator),
             schema=render_schema(StoryBrief),
             answer_format=render_answer_format(StoryBrief),
         )

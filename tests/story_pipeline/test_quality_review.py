@@ -178,11 +178,11 @@ async def test_judge_prompt_covers_three_criteria_and_brief(
     assert '"title": "JudgeVerdict"' in user
 
 
-async def test_judge_prompt_lists_four_criteria(fake_llm) -> None:
-    """Промпт судьи содержит четыре критерия: три прежних и новый.
+async def test_judge_prompt_lists_five_criteria(fake_llm) -> None:
+    """Промпт судьи содержит пять критериев: четыре прежних и манеру.
 
-    Критерий согласованности описания героя добавлен (D13) и не вытеснил ни
-    одного прежнего: без текст-сцена, целостности и безопасности ревизия
+    Критерий манеры добавлен и не вытеснил ни одного прежнего: без
+    текст-сцена, целостности, безопасности и согласованности героя ревизия
     теряет то, ради чего существует.
     """
 
@@ -192,15 +192,17 @@ async def test_judge_prompt_lists_four_criteria(fake_llm) -> None:
     await stage.run(_state())
 
     user = llm.calls[0]["user"]
-    # Прежние три критерия на месте, дословно.
+    # Прежние критерии на месте, дословно.
     assert "Соответствие текста и сцены" in user
     assert "Нарративная целостность" in user
     assert "Возрастная безопасность" in user
-    # Четвёртый: согласованность описания героя между текстом и реестром.
     assert "Согласованность описания героя" in user
     assert "не противоречит" in user
-    # Критериев ровно четыре — заголовок не устарел.
-    assert "по четырём критериям" in user
+    # Пятый: манера и её узкая область — только грубые нарушения.
+    assert "Манера повествования" in user
+    assert "Стилистические придирки нарушением не считаются" in user
+    # Критериев ровно пять — заголовок не устарел.
+    assert "по пяти критериям" in user
 
 
 async def test_judge_prompt_receives_toy_description_and_registry(
@@ -711,3 +713,33 @@ async def test_loop_revises_unresolved_pages_despite_passed_verdict(
     assert state.scenes[1].characters_in_scene == ["Мишка"]
     assert state.unresolved_pages == []
     assert state.status == "ok"
+
+
+async def test_reviser_refreshes_style_report_after_revision(fake_llm) -> None:
+    """Отчёт о манере считается заново по исправленному тексту.
+
+    Иначе в `story.json` лежал бы отчёт о черновике сценариста, а читатель
+    получил бы другой текст — и разбор прогона сравнивал бы несравнимое.
+    """
+
+    state = _state(num_pages=2)
+    state.style_profile_id = "junior"
+    state.judge_history.append(
+        JudgeVerdict(passed=False, issues=["слабая связка"], problem_pages=[1])
+    )
+    revised_text = " ".join(["слово"] * 300)
+    llm = fake_llm(
+        [
+            RevisionPayload(
+                pages=[PageText(page_num=1, text=revised_text)],
+                scenes=[state.scenes[0]],
+            )
+        ]
+    )
+
+    await ReviserStage(llm).run(state)
+
+    assert state.style_report is not None
+    assert state.style_report.profile_id == "junior"
+    assert state.style_report.narrator == state.narrator
+    assert state.style_report.sufficient_sample is True

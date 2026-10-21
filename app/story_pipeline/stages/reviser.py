@@ -31,11 +31,14 @@ from app.story_pipeline.prompts import (
     REVISER_USER,
     format_issues,
     format_scene_pages,
+    format_style_guide,
     render_answer_format,
 )
 from app.story_pipeline.providers.llm import LLMClient, render_schema
 from app.story_pipeline.stages.judge import validate_judge_verdict
 from app.story_pipeline.stages.scene_breakdown import validate_scene_refs
+from app.story_pipeline.style import get_style_profile
+from app.story_pipeline.style_metrics import measure_style
 
 # Температура этапа ревизии: нужны вариативные, но связные правки.
 REVISER_TEMPERATURE = 0.7
@@ -99,6 +102,13 @@ class ReviserStage:
             logline=brief.logline,
             controlling_idea=brief.controlling_idea,
             character_arc=brief.character_arc,
+            # Манера — не менее обязательная часть правки, чем замечание
+            # судьи: страница, из которой убрали диалог и сенсорную деталь
+            # ради формального соответствия, некачественная.
+            style_guide=format_style_guide(
+                get_style_profile(state.style_profile_id, state.age),
+                state.narrator,
+            ),
             issues=format_issues(verdict.issues),
             words_min=words_min,
             words_max=words_max,
@@ -125,6 +135,14 @@ class ReviserStage:
         )
         state.scenes = _apply_scene_revisions(
             state.scenes, payload, problem_set
+        )
+        # Замеры пересчитываются после правки: в артефакте должен лежать
+        # отчёт о том тексте, который уйдёт читателю, а не о черновике
+        # сценариста. Замер — чистая функция, лишних вызовов модели нет.
+        state.style_report = measure_style(
+            state.pages,
+            get_style_profile(state.style_profile_id, state.age),
+            state.narrator,
         )
         normalized_scenes, violations = validate_scene_refs(
             state.scenes, entities

@@ -33,6 +33,7 @@ _STORY_ENV_VARS = (
     "STORY_PAGE_WORDS_MIN",
     "STORY_PAGE_WORDS_MAX",
     "STORY_MAX_REVISIONS",
+    "STORY_NARRATOR",
     "STORY_AGE_MIN",
     "STORY_AGE_MAX",
     "STORY_OUTPUT_DIR",
@@ -106,6 +107,7 @@ def test_defaults_without_max_bot_token(monkeypatch) -> None:
     assert config.story_page_words_min == 60
     assert config.story_page_words_max == 120
     assert config.story_max_revisions == 2
+    assert config.story_narrator == "first_person"
     assert config.story_age_min == 3
     assert config.story_age_max == 6
     assert config.story_output_dir == "output"
@@ -124,6 +126,7 @@ def test_environment_overrides_defaults(monkeypatch) -> None:
     monkeypatch.setenv("STORY_PAGE_WORDS_MIN", "40")
     monkeypatch.setenv("STORY_PAGE_WORDS_MAX", "90")
     monkeypatch.setenv("STORY_AGE_MAX", "8")
+    monkeypatch.setenv("STORY_NARRATOR", "third_person_limited")
     monkeypatch.setenv("STORY_OUTPUT_DIR", "runs")
 
     config = StorySettings(_env_file=None)  # type: ignore[call-arg]
@@ -137,6 +140,7 @@ def test_environment_overrides_defaults(monkeypatch) -> None:
     assert config.story_page_words_min == 40
     assert config.story_page_words_max == 90
     assert config.story_age_max == 8
+    assert config.story_narrator == "third_person_limited"
     assert config.story_output_dir == "runs"
 
 
@@ -437,3 +441,28 @@ def test_negative_retries_and_zero_concurrency_are_rejected() -> None:
         _narration_settings(routerai_narration_retries=-1)
     with pytest.raises(ValidationError):
         _narration_settings(routerai_narration_concurrency=0)
+
+
+# --- Рассказчик ---------------------------------------------------------------
+
+
+def test_narrator_defaults_to_first_person() -> None:
+    """Без настройки рассказчик — игрушка, как и до появления выбора."""
+
+    config = StorySettings(_env_file=None)  # type: ignore[call-arg]
+
+    assert config.story_narrator == "first_person"
+
+
+def test_narrator_is_validated_at_load_time() -> None:
+    """Опечатка в STORY_NARRATOR называется вместе с переменной."""
+
+    with pytest.raises(ValidationError) as failure:
+        StorySettings(  # type: ignore[call-arg]
+            _env_file=None, story_narrator="child"
+        )
+
+    message = str(failure.value)
+    assert "STORY_NARRATOR" in message
+    assert "first_person" in message
+    assert "third_person_limited" in message

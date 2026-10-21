@@ -13,6 +13,8 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 from typing import Any
 
 from app.story_pipeline import cli
@@ -629,3 +631,106 @@ def test_voice_flag_reaches_story_and_artifact(
     assert story["narration_path"]
     assert Path(story["narration_path"]).is_file()
     assert story["narration_path"].startswith(str(run_dir))
+
+
+def test_narrator_flag_reaches_story_and_artifact(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Явный `--narrator` переопределяет настройку и попадает в артефакт."""
+
+    code = cli.run_cli(
+        [
+            "--theme",
+            "Приключение мишки",
+            "--age",
+            "5",
+            "--moral",
+            "Смелость помогает найти друзей",
+            "--pages",
+            "1",
+            "--narrator",
+            "third_person_limited",
+        ],
+        settings=story_settings(
+            story_output_dir=str(tmp_path),
+            story_narrator="first_person",
+        ),
+        llm=fake_llm(_ok_responses(1)),
+        image_provider=fake_image_provider(),
+        now=_fixed_now,
+    )
+
+    assert code == 0
+    story = json.loads((tmp_path / FIXED_TIMESTAMP / "story.json").read_text())
+    assert story["narrator"] == "third_person_limited"
+    assert story["style_profile_id"] == "junior"
+
+
+def test_narrator_defaults_to_settings_value(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Без флага рассказчик берётся из `STORY_NARRATOR`."""
+
+    code = cli.run_cli(
+        [
+            "--theme",
+            "Приключение мишки",
+            "--age",
+            "5",
+            "--moral",
+            "Смелость помогает найти друзей",
+            "--pages",
+            "1",
+        ],
+        settings=story_settings(
+            story_output_dir=str(tmp_path),
+            story_narrator="third_person_limited",
+        ),
+        llm=fake_llm(_ok_responses(1)),
+        image_provider=fake_image_provider(),
+        now=_fixed_now,
+    )
+
+    assert code == 0
+    story = json.loads((tmp_path / FIXED_TIMESTAMP / "story.json").read_text())
+    assert story["narrator"] == "third_person_limited"
+
+
+def test_unknown_narrator_flag_is_rejected_before_generation(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Опечатка в `--narrator` — ошибка разбора аргументов, а не прогон."""
+
+    llm = fake_llm(_ok_responses(1))
+
+    with pytest.raises(SystemExit) as failure:
+        cli.run_cli(
+            [
+                "--theme",
+                "Приключение мишки",
+                "--age",
+                "5",
+                "--moral",
+                "Смелость помогает найти друзей",
+                "--pages",
+                "1",
+                "--narrator",
+                "child",
+            ],
+            settings=story_settings(story_output_dir=str(tmp_path)),
+            llm=llm,
+            image_provider=fake_image_provider(),
+            now=_fixed_now,
+        )
+
+    assert failure.value.code == 2
+    assert llm.call_count == 0

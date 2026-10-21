@@ -39,6 +39,7 @@ from app.story_pipeline.providers.image import ImageProvider
 from app.story_pipeline.providers.llm import LLMClient
 from app.story_pipeline.providers.tts import NarrationProvider
 from app.story_pipeline.settings import StorySettings
+from app.story_pipeline.style import resolve_style_profile
 from app.story_pipeline.stages.entity_extractor import EntityExtractorStage
 from app.story_pipeline.stages.image_generator import ImageGeneratorStage
 from app.story_pipeline.stages.judge import JudgeStage
@@ -207,6 +208,10 @@ class StoryPipeline:
         # вызывающей стороны обязана исправляться здесь, а не ронять
         # прогон позже и непонятно где.
         self._resolve_illustrated_pages(state)
+        # Рассказчик и профиль манеры разрешаются здесь же и до первого
+        # текстового этапа: сценарист, ревизор и судья обязаны видеть одни и
+        # те же правила, иначе вердикт и правка расходятся с заказом.
+        self._resolve_style(state)
         # Границы объёма страницы разрешаются здесь же и до первого этапа:
         # сценарист и ревизор читают их из состояния, а вырожденная пара
         # обязана отклониться до платного вызова, а не на середине прогона.
@@ -346,6 +351,30 @@ class StoryPipeline:
             )
         state.page_words_min = words_min
         state.page_words_max = words_max
+
+    def _resolve_style(self, state: StoryState) -> None:
+        """Разрешить рассказчика и профиль манеры до первого этапа.
+
+        Рассказчик берётся из настроек, если вызывающая сторона не задала его
+        явно: `model_fields_set` отличает «значение по умолчанию» от
+        «передано при сборке состояния», поэтому CLI может переопределить
+        настройку, а прогон без параметра — нет.
+
+        Профиль выбирается по возрасту и записывается в состояние
+        идентификатором: этапы, артефакт и разбор прогона должны называть
+        одни и те же правила. Возраст вне поддерживаемого диапазона
+        отклоняется здесь, до платного вызова.
+        """
+
+        if "narrator" not in state.model_fields_set:
+            state.narrator = self._settings.story_narrator
+        profile = resolve_style_profile(state.age)
+        state.style_profile_id = profile.id
+        logger.debug(
+            "pipeline: манера прогона — профиль {}, рассказчик {}",
+            profile.id,
+            state.narrator,
+        )
 
     async def _notify_stage(self, stage_name: str) -> None:
         """Сообщить о начале этапа, если колбэк передан, и не дать сбою
