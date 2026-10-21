@@ -45,10 +45,11 @@ from app.db.repository import GenerationRepository
 from app.services.toy_vision import ToyVisionService
 from app.story_pipeline.artifacts import write_story_json
 from app.story_pipeline.illustrations import resolve_illustrated_pages
-from app.story_pipeline.models import StoryState
+from app.story_pipeline.models import StoryState, Voice
 from app.story_pipeline.pipeline import StageCallback, StoryPipeline
 from app.story_pipeline.providers.image import make_image_provider
 from app.story_pipeline.providers.llm import DeepSeekLLMClient
+from app.story_pipeline.providers.tts import make_narration_provider
 from app.story_pipeline.settings import StorySettings
 from app.utils.image_mime import detect_image_mime_type
 from app.utils.logger import get_logger
@@ -62,11 +63,24 @@ SendFunc = Callable[..., Awaitable[Any]]
 # «Рисую страницы…», все прочие этапы считаются текстовыми.
 ILLUSTRATE_STAGE = "illustrate"
 
+# Имя этапа озвучки в графе пайплайна: по нему выбирается сообщение
+# «Озвучиваю сказку…». Этап идёт параллельно иллюстрированию, но сообщение
+# о нём отдельное: пользователь должен понимать, что книжка ещё и звучит.
+NARRATION_STAGE = "narration"
+
 # --- Тексты сообщений (пользовательские строки на русском) --------------------
 
 STORY_PROGRESS = "Готовлю сказку…"
 ILLUSTRATION_PROGRESS = "Рисую страницы…"
+NARRATION_PROGRESS = "Озвучиваю сказку…"
 STORY_READY = "Сказка готова! Читайте страницы по порядку."
+NARRATION_CAPTION = (
+    "Сказка целиком в озвучке — можно слушать, не глядя в экран."
+)
+NARRATION_FAILED = (
+    "Озвучку сделать не удалось. Сказка при этом у вас есть — страницы "
+    "выше можно читать как обычно, повторять генерацию не нужно."
+)
 FREE_LIMIT_REACHED = (
     "Вы уже получили бесплатную сказку с картинками. Чтобы сделать новую, "
     "оформите подписку."
@@ -191,6 +205,7 @@ class PipelineFactory(Protocol):
         settings: StorySettings,
         reference_photo: bytes | None,
         on_stage: StageCallback | None,
+        voice: Voice = "female",
     ) -> StoryPipeline: ...
 
 
@@ -210,6 +225,7 @@ class RunRequest:
     photo: bytes
     age: int
     moral: str
+    voice: Voice = "female"
 
 
 @dataclass
@@ -248,17 +264,41 @@ def _read_page_attachment(path: str) -> InputMediaBuffer:
     )
 
 
+def _read_narration_attachment(path: str) -> InputMediaBuffer:
+    """Собрать вложение озвучки из файла каталога прогона.
+
+    mp3 уходит аудио-вложением, WAV (запасной путь без `ffmpeg`) — обычным
+    файлом: MAX надёжно принимает mp3 как аудио, а WAV-контейнер в категории
+    аудио может быть отклонён. Тип выбирается по расширению, потому что
+    файл пишет наш же этап.
+    """
+
+    file_path = Path(path)
+    data = file_path.read_bytes()
+    upload_type = (
+        UploadType.AUDIO
+        if file_path.suffix.lower() == ".mp3"
+        else UploadType.FILE
+    )
+    return InputMediaBuffer(
+        buffer=data, filename=file_path.name, type=upload_type
+    )
+
+
 def build_story_pipeline(
     *,
     settings: StorySettings,
     reference_photo: bytes | None = None,
     on_stage: StageCallback | None = None,
+    voice: Voice = "female",
 ) -> StoryPipeline:
     """Собрать пайплайн с провайдерами, созданными по настройкам прогона.
 
     Провайдеры принадлежат пайплайну (`owns_providers=True`), поэтому
     вызывающий закрывает его сам: у каждого прогона свои HTTP-клиенты, и
-    держать их после завершения прогона незачем.
+    держать их после завершения прогона незачем. Провайдер озвучки строится
+    здесь же: без ключа RouterAI он окажется mock-провайдером и не потратит
+    денег.
     """
 
     return StoryPipeline(
@@ -268,6 +308,7 @@ def build_story_pipeline(
         owns_providers=True,
         reference_photo=reference_photo,
         on_stage=on_stage,
+        narration_provider=make_narration_provider(settings, voice),
     )
 
 
@@ -470,6 +511,7 @@ class StoryRunner:
                 theme=build_theme(description, request.moral, request.age),
                 age=request.age,
                 moral=request.moral,
+                voice=request.voice,
                 num_pages=self.num_pages,
                 toy_description=build_toy_description(description),
                 output_dir=run_settings.story_output_dir,
@@ -480,6 +522,7 @@ class StoryRunner:
                 settings=run_settings,
                 reference_photo=request.photo,
                 on_stage=on_stage,
+                voice=request.voice,
             )
             state = await pipeline.run(state)
         except Exception as exc:  # noqa: BLE001 - обрыв фоновой задачи
@@ -504,6 +547,7 @@ class StoryRunner:
         if state.status == "ok":
             await self._deliver_pages(send, state)
             await send(STORY_READY)
+            await self._deliver_narration(send, state)
             await self._record_state_quietly(
                 request,
                 state,
@@ -625,6 +669,7 @@ class StoryRunner:
             else FREE_REVIEW_RESULT
         )
         await send(STORY_READY)
+        await self._deliver_narration(send, state)
         await self._record_state_quietly(
             request,
             state,
@@ -660,6 +705,7 @@ class StoryRunner:
             PARTIAL_RESULT.format(numbers=numbers_text(missing)),
             [build_restart_keyboard().as_markup()],
         )
+        await self._deliver_narration(send, state)
         await self._record_state_quietly(
             request,
             state,
@@ -756,6 +802,36 @@ class StoryRunner:
 
     # --- Внутренняя реализация -------------------------------------------
 
+    async def _deliver_narration(self, send: SendFunc, state: StoryState) -> None:
+        """Отправить аудиофайл всей сказки или честно сказать, что его нет.
+
+        Аудио уходит отдельным сообщением после страниц и «Сказка готова»:
+        один файл на всю книжку — продуктовое требование. Сбой чтения или
+        отправки файла не должен оставлять пользователя без объяснения,
+        поэтому все ветки заканчиваются либо вложением, либо понятным
+        текстом. Пути каталога в подпись не попадают.
+        """
+
+        if not state.narration_path:
+            logger.info(
+                "Прогон без озвучки: {}", state.narration_error or "не запрошена"
+            )
+            await send(NARRATION_FAILED)
+            return
+
+        try:
+            attachment = _read_narration_attachment(state.narration_path)
+        except OSError as exc:
+            logger.warning("Файл озвучки недоступен: {}", exc)
+            await send(NARRATION_FAILED)
+            return
+
+        try:
+            await send(NARRATION_CAPTION, [attachment])
+        except Exception as exc:  # noqa: BLE001 - загрузка файла в MAX
+            logger.warning("Не удалось отправить озвучку: {}", exc)
+            await send(NARRATION_FAILED)
+
     def _sender_for(self, chat_id: int) -> SendFunc:
         """Отправитель, зафиксированный на чат конкретного прогона.
 
@@ -789,6 +865,8 @@ class StoryRunner:
         message = (
             ILLUSTRATION_PROGRESS
             if stage_name == ILLUSTRATE_STAGE
+            else NARRATION_PROGRESS
+            if stage_name == NARRATION_STAGE
             else STORY_PROGRESS
         )
         if message in announced:

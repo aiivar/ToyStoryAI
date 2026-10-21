@@ -7,6 +7,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# ffmpeg нужен озвучке сказки: Gemini TTS отдаёт PCM, а в MAX уходит mp3.
+# Ставится до копирования кода, чтобы слой переиспользовался при правках.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # Сначала зависимости — так кэш слоёв переиспользуется при правках кода.
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt

@@ -19,6 +19,7 @@ class StoryFlow(StatesGroup):
     waiting_photo = State()
     waiting_age = State()
     waiting_moral = State()
+    waiting_voice = State()
 
 
 __all__ = ["StoryFlow"]

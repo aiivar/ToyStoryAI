@@ -25,13 +25,16 @@ from app.bot.keyboards import (
     RESTART_PAYLOAD,
     SUBSCRIBE_PAYLOAD,
     UPLOAD_PHOTO_PAYLOAD,
+    VOICE_PREFIX,
     build_age_keyboard,
     build_moral_keyboard,
     build_restart_keyboard,
     build_subscription_keyboard,
     build_upload_photo_keyboard,
+    build_voice_keyboard,
     parse_age_payload,
     parse_moral_payload,
+    parse_voice_payload,
 )
 from app.bot.messaging import ChatSender
 from app.bot.runner import (
@@ -78,6 +81,8 @@ AGE_PROMPT = "Сколько лет ребёнку?"
 MORAL_PROMPT = "О чём мораль сказки?"
 AGE_HINT = "Выберите возраст кнопкой ниже — так сказка получится подходящей."
 MORAL_HINT = "Выберите мораль кнопкой ниже — я подставлю её в сказку."
+VOICE_PROMPT = "Каким голосом читать сказку?"
+VOICE_HINT = "Выберите голос кнопкой ниже — женский или мужской."
 UNKNOWN_OPTION = (
     "Такого варианта нет. Выберите один из предложенных на кнопках."
 )
@@ -367,6 +372,13 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
                 [build_moral_keyboard().as_markup()],
             )
             return
+        if state == StoryFlow.waiting_voice:
+            await _reply(
+                event.message.answer,
+                VOICE_HINT,
+                [build_voice_keyboard().as_markup()],
+            )
+            return
         logger.info("Ожидалось фото, получено иное сообщение — прошу фото")
         await _reply(event.message.answer, NOT_A_PHOTO)
 
@@ -406,10 +418,10 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
         event: MessageCallback,
         context: BaseContext,
     ) -> None:
-        """Принять мораль, запустить фоновую генерацию и сбросить диалог.
+        """Принять мораль и спросить голос озвучки.
 
-        Генерация уходит в фоновую задачу, а обработчик возвращается сразу:
-        иначе dispatcher был бы занят минуту-полторы.
+        Запуск генерации происходит на следующем шаге: голос — третий
+        обязательный параметр диалога.
         """
 
         user_id = _callback_user_id(event)
@@ -429,14 +441,61 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
 
         state = await context.get_state()
         data = await context.get_data()
+        age = data.get("age")
+        if state != StoryFlow.waiting_moral or not isinstance(age, int):
+            await _callback_send(
+                event,
+                RESTART_HINT,
+                [build_restart_keyboard().as_markup()],
+            )
+            return
+
+        await context.update_data(moral=moral)
+        await context.set_state(StoryFlow.waiting_voice)
+        await _callback_send(
+            event,
+            VOICE_PROMPT,
+            [build_voice_keyboard().as_markup()],
+        )
+
+    async def on_voice_callback(
+        event: MessageCallback,
+        context: BaseContext,
+    ) -> None:
+        """Принять голос озвучки, запустить фоновую генерацию и сбросить диалог.
+
+        Генерация уходит в фоновую задачу, а обработчик возвращается сразу:
+        иначе dispatcher был бы занят минуту-полторы. Запуск живёт здесь, а
+        не в шаге морали: параметров три, и последний из них — голос.
+        """
+
+        user_id = _callback_user_id(event)
+        voice = parse_voice_payload(_payload(event))
+        if voice is None:
+            await _callback_send(
+                event,
+                UNKNOWN_OPTION,
+                [build_voice_keyboard().as_markup()],
+            )
+            return
+
+        if runs.is_running(user_id):
+            logger.info("Повторный выбор голоса во время прогона: {}", user_id)
+            await _callback_send(event, ALREADY_RUNNING)
+            return
+
+        state = await context.get_state()
+        data = await context.get_data()
         tale_id = data.get("tale_id")
         photo_path = data.get("photo_path")
         age = data.get("age")
+        moral = data.get("moral")
         if (
-            state != StoryFlow.waiting_moral
+            state != StoryFlow.waiting_voice
             or tale_id is None
             or not photo_path
             or not isinstance(age, int)
+            or not isinstance(moral, str)
         ):
             await _callback_send(
                 event,
@@ -454,8 +513,6 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
             await _callback_send(event, PHOTO_UNREADABLE)
             return
 
-        await context.update_data(moral=moral)
-
         request = RunRequest(
             user_id=user_id,
             chat_id=_callback_chat_id(event, user_id),
@@ -464,7 +521,11 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
             photo=photo,
             age=age,
             moral=moral,
+            voice=voice,
         )
+        # Выбор голоса фиксируется в данных диалога до запуска: история
+        # переходов FSM остаётся полной, как у возраста и морали.
+        await context.update_data(voice=voice)
         # Квота проверяется здесь, до обещания «Запускаю сказку!»: отказ,
         # пришедший следом за обещанием, для всего старого состава
         # пользователей выглядел как сломанный бот. Проверка остаётся и в
@@ -518,6 +579,10 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
             await on_moral_callback(event, context)
             return
 
+        if payload is not None and payload.startswith(VOICE_PREFIX):
+            await on_voice_callback(event, context)
+            return
+
         if payload == SUBSCRIBE_PAYLOAD:
             await _callback_send(event, SUBSCRIPTION_STUB)
             return
@@ -540,6 +605,7 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
         StoryFlow.waiting_photo,
         StoryFlow.waiting_age,
         StoryFlow.waiting_moral,
+        StoryFlow.waiting_voice,
     )(on_other_message)
     dp.message_callback()(on_callback)
 
@@ -574,5 +640,7 @@ __all__ = [
     "RESTART_HINT",
     "SUBSCRIPTION_STUB",
     "UNKNOWN_OPTION",
+    "VOICE_HINT",
+    "VOICE_PROMPT",
     "register_handlers",
 ]

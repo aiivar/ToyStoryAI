@@ -27,6 +27,10 @@ from app.story_pipeline.providers.image import (
     make_image_provider,
 )
 from app.story_pipeline.providers.llm import DeepSeekLLMClient, LLMClient
+from app.story_pipeline.providers.tts import (
+    NarrationProvider,
+    make_narration_provider,
+)
 from app.story_pipeline.settings import StorySettings, get_story_settings
 
 # Код возврата при ошибках разбора и валидации аргументов.
@@ -48,6 +52,7 @@ def run_cli(
     settings: StorySettings | None = None,
     llm: LLMClient | None = None,
     image_provider: ImageProvider | None = None,
+    narration_provider: NarrationProvider | None = None,
     now: Callable[[], datetime] | None = None,
 ) -> int:
     """Разобрать аргументы и вернуть код возврата, не бросая наружу сбои."""
@@ -88,6 +93,11 @@ def run_cli(
         if image_provider is not None
         else make_image_provider(run_settings)
     )
+    resolved_narration = (
+        narration_provider
+        if narration_provider is not None
+        else make_narration_provider(run_settings, args.voice)
+    )
     # CLI закрывает только те провайдеры, что создал сам; инъектированные
     # остаются собственностью вызывающего (тесты и внешние композиции).
     owned: list[object] = []
@@ -95,15 +105,23 @@ def run_cli(
         owned.append(resolved_llm)
     if image_provider is None:
         owned.append(resolved_image)
+    if narration_provider is None:
+        owned.append(resolved_narration)
 
     state = StoryState(
         theme=args.theme,
         age=args.age,
         moral=args.moral,
+        voice=args.voice,
         num_pages=args.pages,
         started_at=clock(),
     )
-    pipeline = StoryPipeline(resolved_llm, resolved_image, run_settings)
+    pipeline = StoryPipeline(
+        resolved_llm,
+        resolved_image,
+        run_settings,
+        narration_provider=resolved_narration,
+    )
 
     try:
         state = asyncio.run(_execute(pipeline, state, owned))
@@ -178,6 +196,12 @@ def _build_parser(default_pages: int) -> argparse.ArgumentParser:
         "--output",
         default=None,
         help="Корневой каталог результатов (по умолчанию STORY_OUTPUT_DIR).",
+    )
+    parser.add_argument(
+        "--voice",
+        choices=("female", "male"),
+        default="female",
+        help="Голос озвучки: female (женский) или male (мужской).",
     )
     return parser
 

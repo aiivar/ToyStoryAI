@@ -48,3 +48,20 @@ class TransientImageGenerationError(ImageGenerationError):
 
 class PermanentImageGenerationError(ImageGenerationError):
     """Постоянный сбой генерации изображения; повтор бесполезен."""
+
+
+class NarrationError(StoryPipelineError):
+    """Ошибка синтеза речи.
+
+    Отдельная ветка иерархии нужна потому, что озвучка — единственный
+    этап, сбой которого не делает прогон неуспешным: книжка без аудио
+    остаётся книжкой, а причина фиксируется в состоянии.
+    """
+
+
+class TransientNarrationError(NarrationError):
+    """Временный сбой синтеза речи (сеть, таймаут, 429, 5xx)."""
+
+
+class PermanentNarrationError(NarrationError):
+    """Постоянный сбой синтеза речи (неверный ключ, модель или голос)."""

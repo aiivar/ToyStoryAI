@@ -11,6 +11,7 @@ from __future__ import annotations
 from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.story_pipeline.models import Voice
 from app.story_pipeline.page_words import (
     DEFAULT_PAGE_WORDS_MAX,
     DEFAULT_PAGE_WORDS_MIN,
@@ -98,6 +99,57 @@ class StorySettings(BaseSettings):
             "Таймаут HTTP-запроса к RouterAI в секундах. Живой вызов "
             "одной картинки занимает около 5 с, запас нужен на медленный "
             "ответ и повтор после временного сбоя."
+        ),
+    )
+
+    # --- Озвучка сказки (RouterAI TTS) ----------------------------------
+    routerai_narration_model: str = Field(
+        default="google/gemini-3.8-flash-tts",
+        description=(
+            "Модель синтеза речи в RouterAI. Модели Gemini TTS отдают "
+            "только PCM, поэтому провайдер сам оборачивает поток в WAV."
+        ),
+    )
+    routerai_narration_voice_female: str = Field(
+        default="Kore",
+        description="Имя женского голоса модели синтеза речи.",
+    )
+    routerai_narration_voice_male: str = Field(
+        default="Charon",
+        description="Имя мужского голоса модели синтеза речи.",
+    )
+    routerai_narration_style: str = Field(
+        default="тепло и неторопливо, как рассказчик детских сказок",
+        description=(
+            "Манера чтения для моделей, понимающих стиль словами. "
+            "Передаётся в provider.options, а не в тексте: Gemini читает "
+            "текст дословно и озвучил бы указание вслух."
+        ),
+    )
+    routerai_narration_timeout: float = Field(
+        default=180.0,
+        gt=0,
+        description=(
+            "Таймаут одного запроса синтеза речи в секундах. Живой вызов "
+            "на минуту звука занимает около 25 с, запас нужен на длинные "
+            "страницы и медленный ответ."
+        ),
+    )
+    routerai_narration_retries: int = Field(
+        default=2,
+        ge=0,
+        description=(
+            "Сколько повторов делать после временного сбоя синтеза речи. "
+            "Ноль означает «одна попытка без повторов»."
+        ),
+    )
+    routerai_narration_concurrency: int = Field(
+        default=3,
+        gt=0,
+        description=(
+            "Сколько страниц озвучивается одновременно. Синтез идёт "
+            "параллельно с рисованием, и лишняя жадность здесь упирается "
+            "в лимиты провайдера, а не ускоряет выдачу."
         ),
     )
 
@@ -207,6 +259,52 @@ class StorySettings(BaseSettings):
                 f"положительным числом слов, получено {value}."
             )
         return value
+
+    @field_validator("routerai_narration_model")
+    @classmethod
+    def _check_narration_model(cls, value: str, info: ValidationInfo) -> str:
+        """Отклонить пустую модель синтеза речи.
+
+        Пустое значение выглядело бы как «использовать умолчание», но у
+        TTS умолчания нет: провайдер вернул бы 400 уже на первой странице,
+        когда рисование уже оплачено. Поэтому отказ — при загрузке.
+        """
+
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError(
+                f"{info.field_name.upper()}: модель синтеза речи не может "
+                "быть пустой."
+            )
+        return stripped
+
+    @field_validator(
+        "routerai_narration_voice_female",
+        "routerai_narration_voice_male",
+    )
+    @classmethod
+    def _check_narration_voice(cls, value: str, info: ValidationInfo) -> str:
+        """Отклонить пустое имя голоса озвучки."""
+
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError(
+                f"{info.field_name.upper()}: имя голоса озвучки не может "
+                "быть пустым."
+            )
+        return stripped
+
+    def narration_voice_name(self, voice: Voice) -> str:
+        """Имя голоса провайдера для выбора пользователя.
+
+        Отображение `Voice` → настройка живёт здесь, а не в провайдере:
+        провайдер не должен знать про два продуктовых варианта, ему
+        достаточно одного имени голоса.
+        """
+
+        if voice == "male":
+            return self.routerai_narration_voice_male
+        return self.routerai_narration_voice_female
 
     @model_validator(mode="after")
     def _check_page_words_range(self) -> StorySettings:

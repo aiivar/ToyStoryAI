@@ -158,6 +158,10 @@ async def _run_dialog(
         FakeMessageCallback("moral:2", message=FakeMessage()),
         context,
     )
+    await registered.callback(
+        FakeMessageCallback("voice:male", message=FakeMessage()),
+        context,
+    )
     await registered.runs.wait_idle()
 
     return sender, repository, pipeline
@@ -212,16 +216,21 @@ async def test_end_to_end_acceptance(database: Database) -> None:
     )
     assert context.state == StoryFlow.waiting_age
 
-    # 3. Выбор возраста и морали.
+    # 3. Выбор возраста, морали и голоса озвучки.
     await registered.callback(
         FakeMessageCallback("age:5", message=FakeMessage()), context
     )
     assert context.state == StoryFlow.waiting_moral
     assert context.data["age"] == 5
 
-    moral_callback = FakeMessageCallback("moral:2", message=FakeMessage())
-    await registered.callback(moral_callback, context)
-    assert moral_callback.sent_texts == [handlers_module.GENERATION_STARTED]
+    await registered.callback(
+        FakeMessageCallback("moral:2", message=FakeMessage()), context
+    )
+    assert context.state == StoryFlow.waiting_voice
+
+    voice_callback = FakeMessageCallback("voice:male", message=FakeMessage())
+    await registered.callback(voice_callback, context)
+    assert voice_callback.sent_texts == [handlers_module.GENERATION_STARTED]
 
     # 4. Фоновая генерация отдала страницы по одной с картинками.
     await registered.runs.wait_idle()
@@ -304,7 +313,11 @@ async def test_second_story_is_refused_by_quota(database: Database) -> None:
         FakeMessageCallback("age:5", message=FakeMessage()), context
     )
     await registered.callback(
-        moral_event := FakeMessageCallback("moral:2", message=FakeMessage()),
+        FakeMessageCallback("moral:2", message=FakeMessage()),
+        context,
+    )
+    await registered.callback(
+        voice_event := FakeMessageCallback("voice:female", message=FakeMessage()),
         context,
     )
     await registered.runs.wait_idle()
@@ -312,7 +325,7 @@ async def test_second_story_is_refused_by_quota(database: Database) -> None:
     # Пайплайн не запускался: платный вызов не оплачен впустую.
     assert second_pipeline.calls == []
     # Отказ пришёл на нажатие вместо обещания «Запускаю сказку!».
-    assert moral_event.sent_texts == [runner_module.FREE_LIMIT_REACHED]
+    assert voice_event.sent_texts == [runner_module.FREE_LIMIT_REACHED]
     assert handlers_module.GENERATION_STARTED not in second_sender.sent_texts
     # Второй прогон закрыт как не начавшийся, а не остался «в работе».
     history = await repository.get_history(1)

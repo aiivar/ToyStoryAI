@@ -10,8 +10,10 @@ from app.bot.keyboards import (
     build_restart_keyboard,
     build_subscription_keyboard,
     build_upload_photo_keyboard,
+    build_voice_keyboard,
     parse_age_payload,
     parse_moral_payload,
+    parse_voice_payload,
 )
 from app.bot.states import StoryFlow
 from tests.bot_harness import keyboard_labels
@@ -137,6 +139,31 @@ def test_story_flow_states_cover_new_dialog() -> None:
         "waiting_photo",
         "waiting_age",
         "waiting_moral",
+        "waiting_voice",
     }
     assert "waiting_style" not in names
     assert "waiting_action" not in names
+
+
+def test_voice_keyboard_offers_two_gendered_options() -> None:
+    """Клавиатура озвучки: женский и мужской голос, payload'ы по белому списку."""
+
+    markup = build_voice_keyboard().as_markup()
+    buttons = markup.payload.buttons
+
+    assert keyboard_labels([markup]) == [["Женский голос"], ["Мужской голос"]]
+    assert [button.payload for row in buttons for button in row] == [
+        "voice:female",
+        "voice:male",
+    ]
+
+
+def test_parse_voice_payload_accepts_only_known_values() -> None:
+    """Поддельный payload голоса не превращается в выбор по умолчанию."""
+
+    assert parse_voice_payload("voice:female") == "female"
+    assert parse_voice_payload("voice:male") == "male"
+    assert parse_voice_payload("voice:woman") is None
+    assert parse_voice_payload("voice:") is None
+    assert parse_voice_payload("moral:0") is None
+    assert parse_voice_payload(None) is None

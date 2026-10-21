@@ -38,6 +38,12 @@ class PageText(BaseModel):
     text: str = Field(description="Текст страницы на русском языке.")
 
 
+# Голос озвучки прогона. Отдельный тип, а не строка: значение приходит из
+# клавиатуры бота и из CLI, и опечатка в одном из входов должна отсекаться
+# типами, а не молча давать женский голос по умолчанию.
+Voice = Literal["female", "male"]
+
+
 class PagesPayload(BaseModel):
     """Обёртка ответа сценариста: список страниц сказки.
 
@@ -209,6 +215,15 @@ class StoryState(BaseModel):
     age: int = Field(description="Целевой возраст читателя.")
     moral: str = Field(description="Мораль, которую несёт сказка.")
     num_pages: int = Field(default=6, description="Число страниц сказки.")
+    voice: Voice = Field(
+        default="female",
+        description=(
+            "Голос озвучки: `female` или `male`. По умолчанию женский — "
+            "так CLI без флага и прогоны, начатые до появления озвучки, "
+            "ведут себя предсказуемо. В диалоге бота значение приходит "
+            "из обязательного шага выбора голоса."
+        ),
+    )
     illustrated_pages: list[int] = Field(
         default_factory=list,
         description=(
@@ -274,6 +289,24 @@ class StoryState(BaseModel):
     )
     images: list[PageArt] = Field(
         default_factory=list, description="Готовые изображения страниц."
+    )
+    narration_path: str | None = Field(
+        default=None,
+        description=(
+            "Путь к аудиофайлу озвучки всей сказки. `None` означает, что "
+            "озвучки нет: либо этап не запускался, либо он завершился "
+            "управляемой ошибкой — причина лежит в `narration_error`. "
+            "Хранится путь, а не байты: состояние сериализуется в JSON без "
+            "бинарных данных."
+        ),
+    )
+    narration_error: str | None = Field(
+        default=None,
+        description=(
+            "Причина отсутствия озвучки. Заполняется только управляемым "
+            "сбоем синтеза и не меняет статус прогона: книжка без аудио "
+            "остаётся книжкой."
+        ),
     )
 
     # --- Контроль качества ---------------------------------------------

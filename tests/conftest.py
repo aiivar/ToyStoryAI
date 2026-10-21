@@ -16,8 +16,18 @@ TMP_ROOT = Path(".tmp/tests")
 
 
 @pytest.fixture(autouse=True)
-def _block_external_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Запретить живые сетевые вызовы в unit-тестах (кроме loopback)."""
+def _block_external_network(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    """Запретить живые сетевые вызовы в unit-тестах (кроме loopback).
+
+    Маркер `integration` — явное согласие на живой вызов (он и так выключен
+    по умолчанию в `pytest.ini`), поэтому такие тесты сеть не блокируют.
+    """
+
+    if request.node.get_closest_marker("integration") is not None:
+        return
 
     import socket
 

@@ -20,6 +20,7 @@ QualityReviewLoop → ImageGenerator`` из инъектированных за�
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -36,10 +37,12 @@ from app.story_pipeline.observability import log_stage, total_usage
 from app.story_pipeline.page_words import validate_page_words
 from app.story_pipeline.providers.image import ImageProvider
 from app.story_pipeline.providers.llm import LLMClient
+from app.story_pipeline.providers.tts import NarrationProvider
 from app.story_pipeline.settings import StorySettings
 from app.story_pipeline.stages.entity_extractor import EntityExtractorStage
 from app.story_pipeline.stages.image_generator import ImageGeneratorStage
 from app.story_pipeline.stages.judge import JudgeStage
+from app.story_pipeline.stages.narration import NarrationStage
 from app.story_pipeline.stages.planner import PlannerStage
 from app.story_pipeline.stages.quality_loop import QualityReviewLoop
 from app.story_pipeline.stages.reviser import ReviserStage
@@ -50,6 +53,48 @@ from app.story_pipeline.stages.screenwriter import ScreenwriterStage
 # `Awaitable`, а не `None`: оркестратор ждёт отправку сообщения, иначе
 # «Рисую страницы…» ушло бы уже после того, как рисование началось.
 StageCallback = Callable[[str], Awaitable[None]]
+
+
+class IllustrationsAndNarration:
+    """Параллельный узел графа: иллюстрации и озвучка одновременно.
+
+    Текст страниц готов после судейства, поэтому синтез речи не зависит от
+    картинок. Последовательный запуск добавил бы к выдаче всё время синтеза
+    (около 0,4 от длительности аудио) — при семиминутной сказке это лишние
+    три минуты ожидания.
+
+    Оба этапа работают с одним `StoryState`, но пишут в разные поля и не
+    делают `await` между чтением и записью своих артефактов, поэтому гонки
+    в однопоточном event loop нет. Имя узла — этап иллюстрирования: цикл
+    оркестратора уже сообщил о нём, а о начале озвучки узел сообщает сам.
+    """
+
+    def __init__(
+        self,
+        illustration: Stage,
+        narration: Stage,
+        *,
+        notify: StageCallback,
+    ) -> None:
+        self._illustration = illustration
+        self._narration = narration
+        self._notify = notify
+        self.name = illustration.name
+
+    async def run(self, state: StoryState) -> StoryState:
+        """Запустить оба этапа и дождаться обоих.
+
+        Ошибка иллюстрирования по-прежнему валит прогон: без картинок
+        книжка неполная. Ошибка озвучки не прилетает — этап сам гасит её в
+        состояние.
+        """
+
+        await self._notify(self._narration.name)
+        await asyncio.gather(
+            self._illustration.run(state),
+            self._narration.run(state),
+        )
+        return state
 
 
 class StoryPipeline:
@@ -71,6 +116,7 @@ class StoryPipeline:
         owns_providers: bool = False,
         reference_photo: bytes | None = None,
         on_stage: StageCallback | None = None,
+        narration_provider: NarrationProvider | None = None,
     ) -> None:
         """Собрать граф этапов над инъектированными провайдерами.
 
@@ -79,13 +125,24 @@ class StoryPipeline:
         `StoryState` фото не попадает: состояние сериализуется в
         `story.json` и остаётся без бинарных данных, поэтому фото — вход
         прогона, а не его артефакт. `None` — сценарий без фото (CLI).
+
+        `narration_provider` — провайдер синтеза речи. `None` означает
+        «озвучки нет»: так граф остаётся работоспособным для сборок, которым
+        аудио не нужно, и старые тесты пайплайна не обязаны знать про TTS.
+        При наличии провайдера этап озвучки идёт параллельно иллюстрированию.
         """
 
         self._llm = llm
         self._image_provider = image_provider
+        self._narration_provider = narration_provider
         self._settings = settings
         self._owns_providers = owns_providers
         self._on_stage = on_stage
+        illustration = ImageGeneratorStage(
+            image_provider,
+            reference_photo=reference_photo,
+            aspect_ratio=settings.story_image_aspect_ratio,
+        )
         self._stages: list[Stage] = [
             PlannerStage(llm),
             ScreenwriterStage(llm),
@@ -96,12 +153,24 @@ class StoryPipeline:
                 ReviserStage(llm),
                 max_revisions=settings.story_max_revisions,
             ),
-            ImageGeneratorStage(
-                image_provider,
-                reference_photo=reference_photo,
-                aspect_ratio=settings.story_image_aspect_ratio,
-            ),
+            self._illustration_node(illustration),
         ]
+
+    def _illustration_node(self, illustration: Stage) -> Stage:
+        """Узел «иллюстрации и озвучка»: два этапа одновременно.
+
+        Вынесено отдельным методом, потому что узел нужен только при
+        включённой озвучке, а без неё граф обязан остаться прежним — ровно
+        один этап иллюстрирования, без лишнего слоя.
+        """
+
+        if self._narration_provider is None:
+            return illustration
+        return IllustrationsAndNarration(
+            illustration,
+            NarrationStage(self._narration_provider, self._settings),
+            notify=self._notify_stage,
+        )
 
     @property
     def stages(self) -> tuple[Stage, ...]:
@@ -175,7 +244,10 @@ class StoryPipeline:
         if not self._owns_providers:
             return
         first_error: Exception | None = None
-        for provider in (self._llm, self._image_provider):
+        providers: list[object] = [self._llm, self._image_provider]
+        if self._narration_provider is not None:
+            providers.append(self._narration_provider)
+        for provider in providers:
             close = getattr(provider, "aclose", None)
             if not callable(close):
                 continue

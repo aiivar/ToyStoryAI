@@ -267,6 +267,7 @@ class FakePipelineCall:
     settings: Any
     reference_photo: bytes | None
     on_stage: Any
+    voice: str = "female"
 
 
 class FakePipeline:
@@ -346,12 +347,14 @@ def make_services(
         settings: StorySettings,
         reference_photo: bytes | None,
         on_stage: Any,
+        voice: str = "female",
     ) -> FakePipeline:
         stub.bind(
             FakePipelineCall(
                 settings=settings,
                 reference_photo=reference_photo,
                 on_stage=on_stage,
+                voice=voice,
             )
         )
         return stub

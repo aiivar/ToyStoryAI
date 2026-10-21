@@ -393,3 +393,47 @@ def test_gemini_variables_are_ignored(monkeypatch) -> None:
         name for name in StorySettings.model_fields if name.startswith("gemini_")
     ]
     assert not hasattr(config, "gemini_api_key")
+
+
+# --- Озвучка -----------------------------------------------------------------
+
+
+def _narration_settings(**overrides: object) -> StorySettings:
+    """Настройки озвучки без чтения реального `.env`."""
+
+    return StorySettings(_env_file=None, **overrides)  # type: ignore[call-arg]
+
+
+def test_narration_voice_name_matches_selection() -> None:
+    """Женский и мужской выбор отображаются в настроенные имена голосов."""
+
+    config = _narration_settings(
+        routerai_narration_voice_female="FemaleVoice",
+        routerai_narration_voice_male="MaleVoice",
+    )
+
+    assert config.narration_voice_name("female") == "FemaleVoice"
+    assert config.narration_voice_name("male") == "MaleVoice"
+
+
+def test_empty_narration_model_is_rejected() -> None:
+    """Пустая модель синтеза отклоняется при загрузке настроек."""
+
+    with pytest.raises(ValidationError):
+        _narration_settings(routerai_narration_model="   ")
+
+
+def test_empty_narration_voice_is_rejected() -> None:
+    """Пустое имя голоса отклоняется при загрузке настроек."""
+
+    with pytest.raises(ValidationError):
+        _narration_settings(routerai_narration_voice_female="")
+
+
+def test_negative_retries_and_zero_concurrency_are_rejected() -> None:
+    """Отрицательные повторы и нулевой параллелизм — ошибка настроек."""
+
+    with pytest.raises(ValidationError):
+        _narration_settings(routerai_narration_retries=-1)
+    with pytest.raises(ValidationError):
+        _narration_settings(routerai_narration_concurrency=0)

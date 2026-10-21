@@ -319,14 +319,20 @@ async def test_full_dialog_stores_age_and_moral_and_runs_generation(
     await _prepare_dialog(registered, context)
     await registered.callback(FakeMessageCallback("age:6"), context)
 
-    event = FakeMessageCallback("moral:1")
+    moral_event = FakeMessageCallback("moral:1")
+    await registered.callback(moral_event, context)
+    assert moral_event.sent_texts == [handlers_module.VOICE_PROMPT]
+    assert context.state == StoryFlow.waiting_voice
+
+    event = FakeMessageCallback("voice:male")
     await registered.callback(event, context)
     await registered.runs.wait_idle()
 
-    # Возраст и мораль сохранены в состоянии диалога на момент запуска.
+    # Возраст, мораль и голос сохранены в состоянии диалога на момент запуска.
     assert any(
         snapshot.get("age") == 6
         and snapshot.get("moral") == MORAL_OPTIONS[1]
+        and snapshot.get("voice") == "male"
         for snapshot in context.history
     )
     assert event.sent_texts == [handlers_module.GENERATION_STARTED]
@@ -366,11 +372,13 @@ async def test_moral_value_reaches_pipeline_unchanged(
     await _prepare_dialog(registered, context)
     await registered.callback(FakeMessageCallback("age:4"), context)
     await registered.callback(FakeMessageCallback("moral:2"), context)
+    await registered.callback(FakeMessageCallback("voice:male"), context)
     await registered.runs.wait_idle()
 
     state = seen[0]
     assert state.moral == MORAL_OPTIONS[2]
     assert state.age == 4
+    assert state.voice == "male"
 
 
 async def test_unexpected_text_in_age_state_shows_age_keyboard(
@@ -470,20 +478,20 @@ async def test_fake_moral_value_is_rejected_without_generation(
     assert pipeline.calls == []
 
 
-async def test_moral_without_photo_resets_dialog(
+async def test_voice_without_photo_resets_dialog(
     settings: Settings,
     repository: GenerationRepository,
     storage: PhotoStorage,
 ) -> None:
-    """Мораль без принятого фото не запускает генерацию."""
+    """Голос без принятого фото не запускает генерацию."""
 
     pipeline = FakePipeline()
     registered, _ = _register(settings, repository, storage, pipeline=pipeline)
     context = FakeContext(
-        state=StoryFlow.waiting_moral, data={"age": 4, "tale_id": 1}
+        state=StoryFlow.waiting_voice, data={"age": 4, "tale_id": 1}
     )
 
-    event = FakeMessageCallback("moral:0")
+    event = FakeMessageCallback("voice:female")
     await registered.callback(event, context)
     await registered.runs.wait_idle()
 
@@ -520,8 +528,9 @@ async def test_quota_refusal_replaces_the_generation_promise(
     context = FakeContext(state=StoryFlow.waiting_photo)
     await _prepare_dialog(registered, context)
     await registered.callback(FakeMessageCallback("age:4"), context)
+    await registered.callback(FakeMessageCallback("moral:0"), context)
 
-    event = FakeMessageCallback("moral:0")
+    event = FakeMessageCallback("voice:female")
     await registered.callback(event, context)
     await registered.runs.wait_idle()
 
@@ -557,8 +566,9 @@ async def test_quota_refusal_offers_subscription_button(
     context = FakeContext(state=StoryFlow.waiting_photo)
     await _prepare_dialog(registered, context)
     await registered.callback(FakeMessageCallback("age:4"), context)
+    await registered.callback(FakeMessageCallback("moral:0"), context)
 
-    event = FakeMessageCallback("moral:0")
+    event = FakeMessageCallback("voice:female")
     await registered.callback(event, context)
     await registered.runs.wait_idle()
 
@@ -572,12 +582,12 @@ async def test_quota_refusal_offers_subscription_button(
 # --- 5.8: защита от повторного запуска ----------------------------------------
 
 
-async def test_repeated_moral_click_answers_once_without_second_run(
+async def test_repeated_voice_click_answers_once_without_second_run(
     settings: Settings,
     repository: GenerationRepository,
     storage: PhotoStorage,
 ) -> None:
-    """Повторная доставка морали во время прогона не запускает второй прогон."""
+    """Повторная доставка голоса во время прогона не запускает второй прогон."""
 
     registered, _ = _register(
         settings,
@@ -588,13 +598,14 @@ async def test_repeated_moral_click_answers_once_without_second_run(
     context = FakeContext(state=StoryFlow.waiting_photo)
     await _prepare_dialog(registered, context)
     await registered.callback(FakeMessageCallback("age:4"), context)
+    await registered.callback(FakeMessageCallback("moral:0"), context)
 
-    first = FakeMessageCallback("moral:0")
+    first = FakeMessageCallback("voice:female")
     await registered.callback(first, context)
 
     # Пока фоновая задача жива, реестр её видит.
     assert registered.runs.is_running(1) is True
-    repeat = FakeMessageCallback("moral:0")
+    repeat = FakeMessageCallback("voice:female")
     await registered.callback(repeat, context)
 
     assert repeat.sent_texts == [handlers_module.ALREADY_RUNNING]
@@ -630,6 +641,7 @@ async def test_text_message_during_generation_says_run_in_progress(
     await _prepare_dialog(registered, context)
     await registered.callback(FakeMessageCallback("age:4"), context)
     await registered.callback(FakeMessageCallback("moral:0"), context)
+    await registered.callback(FakeMessageCallback("voice:female"), context)
 
     # Диалог уже закончен, состояние ждёт фото — но прогон ещё идёт.
     assert context.state == StoryFlow.waiting_photo
@@ -670,6 +682,7 @@ async def test_photo_during_generation_does_not_start_another_tale(
     await _prepare_dialog(registered, context)
     await registered.callback(FakeMessageCallback("age:4"), context)
     await registered.callback(FakeMessageCallback("moral:0"), context)
+    await registered.callback(FakeMessageCallback("voice:female"), context)
 
     event = FakeMessageCreated(
         FakeMessage(attachments=[make_image_attachment("http://max/again")])
@@ -701,6 +714,7 @@ async def test_after_generation_dialog_waits_photo_again(
     await _prepare_dialog(registered, context)
     await registered.callback(FakeMessageCallback("age:4"), context)
     await registered.callback(FakeMessageCallback("moral:0"), context)
+    await registered.callback(FakeMessageCallback("voice:female"), context)
     await registered.runs.wait_idle()
 
     assert context.state == StoryFlow.waiting_photo
@@ -709,3 +723,91 @@ async def test_after_generation_dialog_waits_photo_again(
     event = FakeMessageCreated(FakeMessage())
     await registered.other_message(event, context)
     assert event.message.sent_texts == [handlers_module.NOT_A_PHOTO]
+
+
+# --- Шаг выбора голоса озвучки ------------------------------------------------
+
+
+async def test_moral_callback_asks_for_voice_instead_of_starting(
+    settings: Settings,
+    repository: GenerationRepository,
+    storage: PhotoStorage,
+) -> None:
+    """После морали бот спрашивает голос и не запускает прогон."""
+
+    pipeline = FakePipeline()
+    registered, _ = _register(
+        settings,
+        repository,
+        storage,
+        pipeline=pipeline,
+        download_photo=_photo_download(make_photo_bytes(400, 400)),
+    )
+    context = FakeContext(state=StoryFlow.waiting_photo)
+    await _prepare_dialog(registered, context)
+    await registered.callback(FakeMessageCallback("age:5"), context)
+
+    event = FakeMessageCallback("moral:0")
+    await registered.callback(event, context)
+
+    assert event.sent_texts == [handlers_module.VOICE_PROMPT]
+    assert keyboard_labels(event.sent[-1].attachments) == [
+        ["Женский голос"],
+        ["Мужской голос"],
+    ]
+    assert context.state == StoryFlow.waiting_voice
+    assert pipeline.calls == []
+    assert registered.runs.pending == 0
+
+
+async def test_fake_voice_value_is_rejected_without_generation(
+    settings: Settings,
+    repository: GenerationRepository,
+    storage: PhotoStorage,
+) -> None:
+    """Голос вне клавиатуры не запускает генерацию."""
+
+    pipeline = FakePipeline()
+    registered, _ = _register(
+        settings,
+        repository,
+        storage,
+        pipeline=pipeline,
+        download_photo=_photo_download(make_photo_bytes(400, 400)),
+    )
+    context = FakeContext(state=StoryFlow.waiting_photo)
+    await _prepare_dialog(registered, context)
+    await registered.callback(FakeMessageCallback("age:5"), context)
+    await registered.callback(FakeMessageCallback("moral:0"), context)
+
+    event = FakeMessageCallback("voice:robot")
+    await registered.callback(event, context)
+    await registered.runs.wait_idle()
+
+    assert event.sent_texts == [handlers_module.UNKNOWN_OPTION]
+    assert keyboard_labels(event.sent[-1].attachments) == [
+        ["Женский голос"],
+        ["Мужской голос"],
+    ]
+    assert context.state == StoryFlow.waiting_voice
+    assert pipeline.calls == []
+
+
+async def test_unexpected_text_in_voice_state_shows_voice_keyboard(
+    settings: Settings,
+    repository: GenerationRepository,
+    storage: PhotoStorage,
+) -> None:
+    """Текст на шаге голоса получает подсказку с клавиатурой голосов."""
+
+    registered, _ = _register(settings, repository, storage)
+    event = FakeMessageCreated(FakeMessage())
+    context = FakeContext(state=StoryFlow.waiting_voice)
+
+    await registered.other_message(event, context)
+
+    assert event.message.sent_texts == [handlers_module.VOICE_HINT]
+    assert keyboard_labels(event.message.sent[-1].attachments) == [
+        ["Женский голос"],
+        ["Мужской голос"],
+    ]

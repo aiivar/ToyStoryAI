@@ -546,3 +546,86 @@ def test_invalid_pages_is_rejected_before_generation(
     assert llm.call_count == 0
     assert image.calls == []
     assert list(tmp_path.iterdir()) == []
+
+
+class _FakeNarration:
+    """Провайдер озвучки для CLI: короткая тишина без сети."""
+
+    def __init__(self) -> None:
+        self.closed = 0
+
+    async def synthesize(self, text: str) -> bytes:
+        from app.story_pipeline.providers.tts import pcm_to_wav
+
+        return pcm_to_wav(b"\x00\x00" * 2400)
+
+    async def aclose(self) -> None:
+        self.closed += 1
+
+
+def test_voice_flag_defaults_to_female(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Без флага `--voice` прогон озвучивается женским голосом."""
+
+    code = cli.run_cli(
+        [
+            "--theme",
+            "Приключение мишки",
+            "--age",
+            "5",
+            "--moral",
+            "Смелость помогает найти друзей",
+            "--pages",
+            "1",
+        ],
+        settings=story_settings(story_output_dir=str(tmp_path)),
+        llm=fake_llm(_ok_responses(1)),
+        image_provider=fake_image_provider(),
+        narration_provider=_FakeNarration(),
+        now=_fixed_now,
+    )
+
+    assert code == 0
+    story = json.loads((tmp_path / FIXED_TIMESTAMP / "story.json").read_text())
+    assert story["voice"] == "female"
+
+
+def test_voice_flag_reaches_story_and_artifact(
+    tmp_path: Path,
+    fake_llm,
+    fake_image_provider,
+    story_settings,
+) -> None:
+    """Явный `--voice male` попадает в состояние и даёт файл озвучки."""
+
+    code = cli.run_cli(
+        [
+            "--theme",
+            "Приключение мишки",
+            "--age",
+            "5",
+            "--moral",
+            "Смелость помогает найти друзей",
+            "--pages",
+            "1",
+            "--voice",
+            "male",
+        ],
+        settings=story_settings(story_output_dir=str(tmp_path)),
+        llm=fake_llm(_ok_responses(1)),
+        image_provider=fake_image_provider(),
+        narration_provider=_FakeNarration(),
+        now=_fixed_now,
+    )
+
+    assert code == 0
+    run_dir = tmp_path / FIXED_TIMESTAMP
+    story = json.loads((run_dir / "story.json").read_text())
+    assert story["voice"] == "male"
+    assert story["narration_path"]
+    assert Path(story["narration_path"]).is_file()
+    assert story["narration_path"].startswith(str(run_dir))

@@ -247,6 +247,7 @@ def make_request(
     moral: str = MORAL,
     photo: bytes = b"\x89PNG-photo",
     photo_path: str | None = None,
+    voice: str = "female",
 ) -> RunRequest:
     """Запрос на фоновую генерацию."""
 
@@ -258,6 +259,7 @@ def make_request(
         photo=photo,
         age=age,
         moral=moral,
+        voice=voice,  # type: ignore[arg-type]
     )
 
 
@@ -824,7 +826,7 @@ async def test_missing_page_file_keeps_page_text(tmp_path: Path) -> None:
 
     texts = [text for text in bundle.bot.sent_texts if text is not None]
     assert any("Страница 1" in text for text in texts)
-    assert runner_module.PAGE_WITHOUT_IMAGE in texts[-2]
+    assert any(runner_module.PAGE_WITHOUT_IMAGE in text for text in texts)
     assert not any("output/" in text or ".tmp" in text for text in texts)
     # Запись о прогоне при этом остаётся успешной: текст-то отправлен.
     assert bundle.repository.updates[-1]["status"] is GenerationStatus.SUCCESS
@@ -1551,3 +1553,113 @@ async def test_vision_receives_photo_bytes(tmp_path: Path) -> None:
     await bundle.runner.run(make_request(photo=photo))
 
     assert vision.photos == [photo]
+
+
+# --- Озвучка: доставка и прогресс ---------------------------------------------
+
+
+async def test_narration_audio_is_sent_after_story_ready(
+    tmp_path: Path,
+) -> None:
+    """Аудио уходит отдельным сообщением после страниц и «Сказка готова»."""
+
+    state = made_state(tmp_path, pages=1)
+    audio_path = tmp_path / "narration.mp3"
+    audio_path.write_bytes(b"ID3-audio")
+    state.narration_path = str(audio_path)
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request())
+
+    last = bundle.bot.sent[-1]
+    assert last.text == runner_module.NARRATION_CAPTION
+    assert len(last.attachments or []) == 1
+    assert last.attachments[0].type is UploadType.AUDIO
+    texts = [text for text in bundle.bot.sent_texts if text]
+    assert texts[-2] == runner_module.STORY_READY
+    assert not any(str(tmp_path) in (text or "") for text in texts)
+
+
+async def test_absent_narration_reports_without_breaking_story(
+    tmp_path: Path,
+) -> None:
+    """Прогон без озвучки всё равно доставляет книжку и честно говорит о сбое."""
+
+    state = made_state(tmp_path, pages=1)
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request())
+
+    assert runner_module.NARRATION_FAILED in bundle.bot.sent_texts
+    assert bundle.repository.statuses[-1] is GenerationStatus.SUCCESS
+
+
+async def test_unreadable_narration_file_reports_failure(
+    tmp_path: Path,
+) -> None:
+    """Пропавший файл озвучки не превращается в битое вложение."""
+
+    state = made_state(tmp_path, pages=1)
+    state.narration_path = str(tmp_path / "missing.mp3")
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request())
+
+    last = bundle.bot.sent[-1]
+    assert last.text == runner_module.NARRATION_FAILED
+    assert not last.attachments
+
+
+async def test_narration_progress_is_announced_once(tmp_path: Path) -> None:
+    """Сообщение «Озвучиваю сказку…» приходит один раз за прогон."""
+
+    bundle = make_runner(
+        pipeline=RecordingPipeline(
+            result=made_state(tmp_path),
+            stage_names=("plan", "illustrate", "narration", "narration"),
+        )
+    )
+
+    await bundle.runner.run(make_request())
+
+    texts = [text for text in bundle.bot.sent_texts if text]
+    assert texts.count(runner_module.NARRATION_PROGRESS) == 1
+
+
+async def test_voice_reaches_pipeline_factory(tmp_path: Path) -> None:
+    """Выбранный голос уходит в сборку пайплайна вместе с прогоном."""
+
+    bundle = make_runner(pipeline=RecordingPipeline(result=made_state(tmp_path)))
+
+    await bundle.runner.run(make_request(voice="male"))
+
+    assert bundle.pipeline.calls[0].voice == "male"
+
+
+async def test_partial_result_still_delivers_narration(tmp_path: Path) -> None:
+    """Частичный результат: пояснение о пропуске, затем аудио всей сказки."""
+
+    state = made_state(
+        tmp_path,
+        status="needs_review",
+        pages=2,
+        illustrated=(1,),
+        illustrated_set=(1, 2),
+    )
+    audio_path = tmp_path / "narration.mp3"
+    audio_path.write_bytes(b"ID3-audio")
+    state.narration_path = str(audio_path)
+    bundle = make_runner(pipeline=RecordingPipeline(result=state))
+
+    await bundle.runner.run(make_request())
+
+    texts = [text for text in bundle.bot.sent_texts if text]
+    assert any(runner_module.PARTIAL_TITLE in text for text in texts)
+    audio_messages = [
+        item
+        for item in bundle.bot.sent
+        if item.attachments
+        and item.attachments[0].type is UploadType.AUDIO
+    ]
+    assert len(audio_messages) == 1
+    assert audio_messages[0].text == runner_module.NARRATION_CAPTION

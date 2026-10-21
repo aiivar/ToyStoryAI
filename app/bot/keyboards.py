@@ -11,8 +11,12 @@ LLM невозможен, а поддельный payload разбирается
 
 from __future__ import annotations
 
+from typing import cast
+
 from maxapi.types.attachments.buttons.callback_button import CallbackButton
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
+
+from app.story_pipeline.models import Voice
 
 # Возраст читателя: значения совпадают с диапазоном пайплайна по умолчанию.
 AGE_OPTIONS: tuple[int, ...] = (3, 4, 5, 6)
@@ -43,6 +47,15 @@ SUBSCRIBE_PAYLOAD = "subscribe"
 RESTART_PAYLOAD = "restart"
 AGE_PREFIX = "age:"
 MORAL_PREFIX = "moral:"
+VOICE_PREFIX = "voice:"
+
+# Голоса озвучки: payload кодирует продуктовый выбор, а не имя голоса
+# вендора. Имя модели и голоса живут в настройках, поэтому смена вендора не
+# меняет клавиатуру и историю диалога.
+VOICE_OPTIONS: dict[str, str] = {
+    "female": "Женский голос",
+    "male": "Мужской голос",
+}
 
 
 def age_label(age: int) -> str:
@@ -76,6 +89,22 @@ def parse_moral_payload(payload: str | None) -> str | None:
     """Вернуть мораль по payload'у кнопки или None."""
 
     return _parse_option(payload, MORAL_PREFIX, MORAL_OPTIONS)
+
+
+def parse_voice_payload(payload: str | None) -> Voice | None:
+    """Вернуть голос по payload'у кнопки или None.
+
+    Проверка идёт по белому списку `VOICE_OPTIONS`: поддельный payload
+    `voice:woman` не должен превратиться в женский голос по остаточному
+    принципу, иначе выбор пользователя перестаёт быть выбором.
+    """
+
+    if not payload or not payload.startswith(VOICE_PREFIX):
+        return None
+    raw_value = payload[len(VOICE_PREFIX) :]
+    if raw_value not in VOICE_OPTIONS:
+        return None
+    return cast(Voice, raw_value)
 
 
 def _parse_option(
@@ -135,6 +164,20 @@ def build_moral_keyboard() -> InlineKeyboardBuilder:
     return builder
 
 
+def build_voice_keyboard() -> InlineKeyboardBuilder:
+    """Кнопки выбора голоса озвучки: женский и мужской."""
+
+    builder = InlineKeyboardBuilder()
+    for value, label in VOICE_OPTIONS.items():
+        builder.row(
+            CallbackButton(
+                text=label,
+                payload=f"{VOICE_PREFIX}{value}",
+            )
+        )
+    return builder
+
+
 def build_subscription_keyboard() -> InlineKeyboardBuilder:
     """Кнопка предложения подписки для исчерпанной квоты."""
 
@@ -169,12 +212,16 @@ __all__ = [
     "RESTART_PAYLOAD",
     "SUBSCRIBE_PAYLOAD",
     "UPLOAD_PHOTO_PAYLOAD",
+    "VOICE_OPTIONS",
+    "VOICE_PREFIX",
     "age_label",
     "build_age_keyboard",
     "build_moral_keyboard",
     "build_restart_keyboard",
     "build_subscription_keyboard",
     "build_upload_photo_keyboard",
+    "build_voice_keyboard",
     "parse_age_payload",
     "parse_moral_payload",
+    "parse_voice_payload",
 ]
