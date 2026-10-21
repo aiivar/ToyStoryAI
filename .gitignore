@@ -26,3 +26,5 @@ uploads/
 output/
 *.db
 *.db-journal
+*.db.bak-*
+
