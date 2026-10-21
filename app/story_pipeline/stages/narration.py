@@ -3,7 +3,13 @@
 Узел графа, который работает параллельно иллюстрированию (см. `pipeline`).
 Он озвучивает **только тексты страниц** в порядке номеров: вступление,
 заголовок и «Конец» не дописываются — это продуктовое требование, а не
-экономия. Между страницами вставляется пауза, чтобы границы были слышны.
+экономия.
+
+Весь текст сказки уходит провайдеру **одним запросом**: постраничный синтез
+давал разные темп и громкость на соседних страницах и слышимые швы. Пауз
+этап не добавляет — их расставляет сама речь на знаках препинания. Нарезка
+остаётся только страховкой от лимита модели и идёт по границам предложений,
+без привязки к страницам.
 
 Сбой озвучки — управляемая деградация, а не исключение: книжка уже
 оплачена и обязана дойти до родителя без аудио. Причина остаётся в
@@ -20,7 +26,6 @@ from typing import Sequence
 from loguru import logger
 
 from app.story_pipeline.audio import (
-    PAGE_PAUSE_MS,
     concat_wav,
     transcode_to_mp3,
     wav_duration_ms,
@@ -32,10 +37,11 @@ from app.story_pipeline.settings import StorySettings
 # Имя этапа в метриках и в прогрессе бота.
 STAGE_NAME = "narration"
 
-# Предел текста на один запрос синтеза. Страница обычно короче, но длинная
-# режется по границам предложений: так лимит модели не превращается в
-# обрезанную озвучку в середине слова.
-MAX_CHUNK_CHARS = 1200
+# Предел текста на один запрос синтеза. Прокси для лимита промпта модели
+# (8192 токена): максимальная сказка из настроек — 12 страниц по 120 слов,
+# это примерно 9–10 тыс. знаков. Нарезка срабатывает только на аномально
+# длинном тексте и идёт по границам предложений.
+MAX_CHUNK_CHARS = 12000
 
 # Имена файлов озвучки в каталоге прогона.
 MP3_FILENAME = "narration.mp3"
@@ -43,7 +49,7 @@ WAV_FILENAME = "narration.wav"
 
 
 class NarrationStage:
-    """Озвучить страницы и сохранить один аудиофайл в каталог прогона."""
+    """Озвучить сказку целиком и сохранить один аудиофайл в каталог прогона."""
 
     name = STAGE_NAME
 
@@ -53,14 +59,14 @@ class NarrationStage:
         settings: StorySettings,
         *,
         concurrency: int | None = None,
-        pause_ms: int = PAGE_PAUSE_MS,
     ) -> None:
         self._provider = provider
         self._settings = settings
+        # Параллелизм нужен только fallback-нарезке длинного текста:
+        # обычная сказка синтезируется одним запросом.
         self._concurrency = max(
             1, concurrency or settings.routerai_narration_concurrency
         )
-        self._pause_ms = pause_ms
 
     async def run(self, state: StoryState) -> StoryState:
         """Синтезировать сказку и не выбросить наружу сбой синтеза."""
@@ -68,12 +74,13 @@ class NarrationStage:
         started = time.perf_counter()
         attempts = 0
         try:
-            chunks = self._chunks(state)
-            if not chunks:
+            text = self._text(state)
+            if not text:
                 raise ValueError("в состоянии нет страниц для озвучки")
+            chunks = _split_text(text, MAX_CHUNK_CHARS)
             attempts = len(chunks)
             segments = await self._synthesize(chunks)
-            wav = concat_wav(segments, pause_ms=self._pause_ms)
+            wav = concat_wav(segments)
             mp3 = await asyncio.to_thread(transcode_to_mp3, wav)
             path = self._write(state, mp3 if mp3 is not None else wav)
             state.narration_path = str(path)
@@ -103,20 +110,19 @@ class NarrationStage:
 
     # --- Внутренняя реализация -------------------------------------------
 
-    def _chunks(self, state: StoryState) -> list[str]:
-        """Тексты страниц в порядке номеров, нарезанные по лимиту.
+    def _text(self, state: StoryState) -> str:
+        """Один текст сказки: страницы по порядку через пустую строку.
 
-        Нарезка нужна ради лимита промпта модели: страница — обычный
-        случай, но длинная страница не должна обрываться на середине.
+        Пустая строка — подсказка модели сделать паузу на границе страницы;
+        отдельного сегмента и отдельного запроса для страницы нет.
         """
 
-        chunks: list[str] = []
-        for page in sorted(state.pages, key=lambda item: item.page_num):
-            text = page.text.strip()
-            if not text:
-                continue
-            chunks.extend(_split_text(text, MAX_CHUNK_CHARS))
-        return chunks
+        texts = [
+            page.text.strip()
+            for page in sorted(state.pages, key=lambda item: item.page_num)
+            if page.text.strip()
+        ]
+        return "\n\n".join(texts)
 
     async def _synthesize(self, chunks: Sequence[str]) -> list[bytes]:
         """Синтезировать чанки с ограничением параллелизма, сохранив порядок."""

@@ -38,7 +38,11 @@ from app.story_pipeline.providers.tts import (
     pcm_to_wav,
 )
 from app.story_pipeline.settings import StorySettings
-from app.story_pipeline.stages.narration import NarrationStage
+from app.story_pipeline.stages import narration as narration_module
+from app.story_pipeline.stages.narration import (
+    MAX_CHUNK_CHARS,
+    NarrationStage,
+)
 
 
 def settings(**overrides: object) -> StorySettings:
@@ -104,6 +108,18 @@ def state_with_pages(tmp_path: Path, texts: list[str]) -> StoryState:
         output_dir=str(tmp_path),
         started_at=datetime.now(timezone.utc),
     )
+
+
+def pages_of_sentences(count: int, sentences_per_page: int) -> list[str]:
+    """Страницы предсказуемого объёма: текст точно превышает лимит запроса."""
+
+    return [
+        " ".join(
+            f"Страница {page}, предложение {index}."
+            for index in range(sentences_per_page)
+        )
+        for page in range(1, count + 1)
+    ]
 
 
 # --- Провайдер ---------------------------------------------------------------
@@ -246,13 +262,13 @@ async def test_mock_provider_returns_valid_wav() -> None:
 # --- Аудио -------------------------------------------------------------------
 
 
-def test_concat_inserts_pause_between_pages() -> None:
-    """Склейка трёх сегментов даёт сумму длительностей плюс паузы."""
+def test_concat_joins_segments_without_pause() -> None:
+    """Склейка трёх сегментов равна сумме длительностей, без пауз."""
 
     segments = [wav_of(0.1) for _ in range(3)]
-    combined = concat_wav(segments, pause_ms=400)
+    combined = concat_wav(segments)
 
-    assert wav_duration_ms(combined) == pytest.approx(1100, abs=15)
+    assert wav_duration_ms(combined) == pytest.approx(300, abs=15)
 
 
 def test_concat_rejects_different_formats() -> None:
@@ -300,12 +316,11 @@ async def test_stage_writes_single_audio_file(tmp_path: Path) -> None:
     """Один файл на всю сказку, страницы озвучены по порядку."""
 
     provider = FakeNarrationProvider()
-    stage = NarrationStage(provider, settings(), pause_ms=100)
+    stage = NarrationStage(provider, settings())
     state = state_with_pages(tmp_path, ["Первая.", "Вторая.", "Третья."])
 
     await stage.run(state)
 
-    assert provider.texts == ["Первая.", "Вторая.", "Третья."]
     assert state.narration_error is None
     assert state.narration_path is not None
     path = Path(state.narration_path)
@@ -318,11 +333,73 @@ async def test_stage_writes_single_audio_file(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_stage_sends_whole_story_in_one_request(tmp_path: Path) -> None:
+    """Весь текст сказки уходит одним запросом, а не по страницам."""
+
+    provider = FakeNarrationProvider()
+    stage = NarrationStage(provider, settings())
+    state = state_with_pages(tmp_path, ["Первая.", "Вторая.", "Третья."])
+
+    await stage.run(state)
+
+    assert provider.texts == ["Первая.\n\nВторая.\n\nТретья."]
+
+
+@pytest.mark.asyncio
+async def test_stage_splits_over_limit_text_by_sentences(
+    tmp_path: Path,
+) -> None:
+    """Длинный текст режется по предложениям, а не по страницам."""
+
+    texts = pages_of_sentences(8, 100)
+    assert sum(len(text) for text in texts) > MAX_CHUNK_CHARS
+    provider = FakeNarrationProvider()
+    stage = NarrationStage(provider, settings())
+    state = state_with_pages(tmp_path, texts)
+
+    await stage.run(state)
+
+    assert 1 < len(provider.texts) < len(texts)
+    assert all(len(chunk) <= MAX_CHUNK_CHARS for chunk in provider.texts)
+    # Первый запрос содержит несколько страниц подряд: границы страниц
+    # больше не совпадают с границами запросов.
+    assert "Страница 1," in provider.texts[0]
+    assert "Страница 2," in provider.texts[0]
+    combined = " ".join(provider.texts)
+    for page in range(1, len(texts) + 1):
+        assert f"Страница {page}," in combined
+
+
+@pytest.mark.asyncio
+async def test_stage_fallback_chunks_have_no_artificial_pause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Сегменты fallback-нарезки склеиваются без паузы между страницами."""
+
+    monkeypatch.setattr(
+        narration_module, "transcode_to_mp3", lambda wav: None
+    )
+    provider = FakeNarrationProvider(seconds=0.1)
+    stage = NarrationStage(provider, settings())
+    state = state_with_pages(tmp_path, pages_of_sentences(8, 100))
+
+    await stage.run(state)
+
+    assert len(provider.texts) > 1
+    assert state.narration_path is not None
+    audio = Path(state.narration_path).read_bytes()
+    assert wav_duration_ms(audio) == pytest.approx(
+        len(provider.texts) * 100, abs=15
+    )
+
+
+@pytest.mark.asyncio
 async def test_stage_failure_is_degradation(tmp_path: Path) -> None:
     """Сбой синтеза не меняет статус и не выбрасывает исключение."""
 
     provider = FakeNarrationProvider(error=TransientNarrationError("сбой"))
-    stage = NarrationStage(provider, settings(), pause_ms=50)
+    stage = NarrationStage(provider, settings())
     state = state_with_pages(tmp_path, ["Страница."])
 
     result = await stage.run(state)
@@ -334,32 +411,14 @@ async def test_stage_failure_is_degradation(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_stage_splits_long_page(tmp_path: Path) -> None:
-    """Длинная страница режется на несколько запросов без потери текста."""
-
-    provider = FakeNarrationProvider()
-    stage = NarrationStage(provider, settings(), pause_ms=50)
-    long_text = " ".join(["Предложение про мишку."] * 200)
-    state = state_with_pages(tmp_path, [long_text])
-
-    await stage.run(state)
-
-    assert len(provider.texts) > 1
-    joined = " ".join(provider.texts).replace("  ", " ")
-    assert "мишку" in joined
-    assert len("".join(provider.texts)) >= len(long_text.replace(" ", "")) - 10
-
-
-@pytest.mark.asyncio
 async def test_stage_limits_concurrency(tmp_path: Path) -> None:
-    """Одновременных запросов не больше заданного предела."""
+    """Одновременных запросов fallback-нарезки не больше предела."""
 
     provider = FakeNarrationProvider()
-    stage = NarrationStage(
-        provider, settings(), concurrency=2, pause_ms=50
-    )
-    state = state_with_pages(tmp_path, [f"Страница {n}." for n in range(6)])
+    stage = NarrationStage(provider, settings(), concurrency=2)
+    state = state_with_pages(tmp_path, pages_of_sentences(40, 100))
 
     await stage.run(state)
 
-    assert provider.max_active <= 2
+    assert len(provider.texts) > 2
+    assert provider.max_active == 2

@@ -2,10 +2,11 @@
 
 Склейка и измерение — стандартная библиотека: провайдер отдаёт WAV одного
 формата, поэтому конкатенация PCM-кадров корректна и не требует внешних
-зависимостей. Кодирование в mp3 — единственное место, где нужен `ffmpeg`:
-MAX надёжно принимает mp3/m4a, а Gemini TTS отдаёт только PCM. Отсутствие
-`ffmpeg` не падает исключением, а возвращает `None`: прогон деградирует до
-WAV-файла, а не теряет книжку.
+зависимостей. Склейка нужна только fallback-нарезке длинного текста и не
+добавляет пауз: их расставляет сама речь. Кодирование в mp3 — единственное
+место, где нужен `ffmpeg`: MAX надёжно принимает mp3/m4a, а Gemini TTS
+отдаёт только PCM. Отсутствие `ffmpeg` не падает исключением, а возвращает
+`None`: прогон деградирует до WAV-файла, а не теряет книжку.
 """
 
 from __future__ import annotations
@@ -18,20 +19,12 @@ from collections.abc import Sequence
 
 from loguru import logger
 
-# Пауза между страницами: граница страницы должна быть слышна, иначе текст
-# двух страниц сливается в один абзац.
-PAGE_PAUSE_MS = 400
-
 # Битрейт mp3 для речи: 64 кбит/с моно достаточно и не раздувает файл.
 MP3_BITRATE = "64k"
 
 
-def concat_wav(
-    segments: Sequence[bytes],
-    *,
-    pause_ms: int = PAGE_PAUSE_MS,
-) -> bytes:
-    """Склеить WAV-сегменты в один, вставив паузу между ними.
+def concat_wav(segments: Sequence[bytes]) -> bytes:
+    """Склеить WAV-сегменты в один непрерывный поток.
 
     Сегменты обязаны иметь одинаковые параметры потока: их пишет один
     провайдер одним способом. Расхождение — ошибка вызывающего кода, а не
@@ -47,9 +40,6 @@ def concat_wav(
         rate = first.getframerate()
         frames: list[bytes] = [first.readframes(first.getnframes())]
 
-    silence_frame = b"\x00" * (width * channels)
-    pause_frames = silence_frame * int(rate * pause_ms / 1000)
-
     for raw in segments[1:]:
         with wave.open(io.BytesIO(raw), "rb") as segment:
             if (
@@ -63,7 +53,6 @@ def concat_wav(
                     f"{segment.getframerate()} вместо "
                     f"{channels}x{width}x{rate}"
                 )
-            frames.append(pause_frames)
             frames.append(segment.readframes(segment.getnframes()))
 
     buffer = io.BytesIO()
@@ -137,7 +126,6 @@ def transcode_to_mp3(wav: bytes) -> bytes | None:
 
 __all__ = [
     "MP3_BITRATE",
-    "PAGE_PAUSE_MS",
     "concat_wav",
     "transcode_to_mp3",
     "wav_duration_ms",
