@@ -15,12 +15,21 @@ from loguru import logger
 from app.story_pipeline.models import ExtractedEntities, PageScene
 from app.story_pipeline.prompts import ART_STYLE_DEFAULT
 
-# Завершающая фраза промпта страницы — дословно из спецификации
-# `story-illustration`. Требует согласованного дизайна персонажей между
-# страницами и стиля детской книжной иллюстрации.
+# Требование согласованности дизайна персонажей между страницами и стиля
+# детской книжной иллюстрации — дословно из спецификации
+# `story-illustration`. Без завершающей точки: точку добавляет общий
+# разделитель сегментов, иначе перед следующим требованием получается `. .`.
 CONSISTENCY_TAIL = (
     "Consistent character design across all pages, "
-    "children's book illustration."
+    "children's book illustration"
+)
+
+# Требование отсутствия текста на картинке. Страница иллюстрирует сцену,
+# а подпись рисует модель случайно и почти всегда с нечитаемыми
+# псевдобукквами — такой артефакт родителю показывать нельзя.
+NO_TEXT_TAIL = (
+    "No text, no letters, no numbers, no captions, no speech bubbles, "
+    "no signature, no watermark."
 )
 
 # Разделитель непустых сегментов промпта.
@@ -149,6 +158,7 @@ def build_art_prompt(scene: PageScene, entities: ExtractedEntities) -> str:
             location_segment,
             objects_segment,
             CONSISTENCY_TAIL,
+            NO_TEXT_TAIL,
         )
     )
 
@@ -209,6 +219,7 @@ __all__ = [
     "CHARACTER_SHEET_PHOTO_REFERENCE",
     "CHARACTER_SHEET_TAIL",
     "CONSISTENCY_TAIL",
+    "NO_TEXT_TAIL",
     "SEGMENT_SEPARATOR",
     "build_art_prompt",
     "build_character_sheet_prompt",

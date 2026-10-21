@@ -18,6 +18,7 @@ from app.story_pipeline.models import (
 from app.story_pipeline.prompts import ART_STYLE_DEFAULT
 from app.story_pipeline.stages.prompt_builder import (
     CHARACTER_SHEET_PHOTO_REFERENCE,
+    NO_TEXT_TAIL,
     build_art_prompt,
     build_character_sheet_prompt,
 )
@@ -81,7 +82,9 @@ def test_build_art_prompt_matches_canonical_formula() -> None:
         "Location: Детская (светлая комната с окном). "
         "Objects: Корзинка (плетёная корзинка с грибами). "
         "Consistent character design across all pages, "
-        "children's book illustration."
+        "children's book illustration. "
+        "No text, no letters, no numbers, no captions, no speech bubbles, "
+        "no signature, no watermark."
     )
 
 
@@ -103,7 +106,9 @@ def test_build_art_prompt_without_characters_drops_empty_segments() -> None:
         "Пустая комната утром. "
         "Location: Детская (светлая комната с окном). "
         "Consistent character design across all pages, "
-        "children's book illustration."
+        "children's book illustration. "
+        "No text, no letters, no numbers, no captions, no speech bubbles, "
+        "no signature, no watermark."
     )
     assert ". ." not in prompt
     assert "  " not in prompt
@@ -128,7 +133,9 @@ def test_build_art_prompt_degrades_when_description_absent() -> None:
         "Location: Чердак. "
         "Objects: Фонарик, Мяч, Корзинка (плетёная корзинка с грибами). "
         "Consistent character design across all pages, "
-        "children's book illustration."
+        "children's book illustration. "
+        "No text, no letters, no numbers, no captions, no speech bubbles, "
+        "no signature, no watermark."
     )
     assert "()" not in prompt
 
@@ -162,7 +169,9 @@ def test_build_art_prompt_logs_unknown_names_without_failing() -> None:
         "Location: Космос. "
         "Objects: Меч. "
         "Consistent character design across all pages, "
-        "children's book illustration."
+        "children's book illustration. "
+        "No text, no letters, no numbers, no captions, no speech bubbles, "
+        "no signature, no watermark."
     )
     # По одному предупреждению на неизвестные имя персонажа, локацию и объект.
     assert len(messages) == 3
@@ -188,6 +197,23 @@ def test_build_art_prompt_falls_back_to_default_art_style() -> None:
 
         assert prompt.startswith(f"{ART_STYLE_DEFAULT}. ")
         assert prompt.split(". ")[0] == ART_STYLE_DEFAULT
+
+
+def test_build_art_prompt_forbids_text_on_picture() -> None:
+    """Промпт страницы прямо запрещает любой текст на картинке."""
+
+    scene = PageScene(
+        page_num=1,
+        scene_description="Мишка читает книгу",
+        characters_in_scene=["Мишка"],
+        location="Детская",
+        objects_in_scene=[],
+    )
+
+    prompt = build_art_prompt(scene, _entities())
+
+    assert NO_TEXT_TAIL in prompt
+    assert prompt.endswith(NO_TEXT_TAIL)
 
 
 def test_build_character_sheet_prompt_lists_characters_and_requirements() -> None:
