@@ -201,6 +201,27 @@ def test_max_upload_retry_values_are_validated(monkeypatch) -> None:
         Settings(_env_file=None)  # type: ignore[call-arg]
 
 
+def test_deepseek_max_tokens_default_is_consistent(monkeypatch) -> None:
+    """Умолчание лимита токенов одинаково у `Settings` и `StorySettings`.
+
+    Обе модели читают одну переменную `DEEPSEEK_MAX_TOKENS`, но обслуживают
+    разные запросы (распознавание игрушки и текст сказки). Разные умолчания
+    означают разный бюджет в зависимости от сервиса и расходятся с таблицей
+    переменных в README, где указано 8192.
+    """
+
+    monkeypatch.delenv("DEEPSEEK_MAX_TOKENS", raising=False)
+
+    bot_settings = _bot_settings()
+    story_settings = StorySettings(_env_file=None)  # type: ignore[call-arg]
+
+    assert bot_settings.deepseek_max_tokens == 8192
+    assert (
+        bot_settings.deepseek_max_tokens
+        == story_settings.deepseek_max_tokens
+    )
+
+
 def test_max_upload_retry_env_overrides_defaults(monkeypatch) -> None:
     """Значения бюджета ожидания читаются из окружения."""
 
