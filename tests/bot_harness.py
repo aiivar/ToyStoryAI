@@ -181,16 +181,22 @@ class FakeContext:
 
 
 class FakeDispatcher:
-    """Диспетчер-заглушка, собирающий зарегистрированные обработчики."""
+    """Диспетчер-заглушка, собирающий зарегистрированные обработчики.
+
+    Кроме самих функций хранятся аргументы регистрации (`filters`): по ним
+    тесты отличают маршрут с FSM-состоянием от «ловушки» без фильтров.
+    """
 
     def __init__(self) -> None:
         self.message_created_handlers: list[Any] = []
         self.message_callback_handlers: list[Any] = []
         self.bot_started_handlers: list[Any] = []
+        self.message_created_registrations: list[tuple[Any, tuple, dict]] = []
 
     def message_created(self, *args: Any, **kwargs: Any):
         def decorator(func: Any) -> Any:
             self.message_created_handlers.append(func)
+            self.message_created_registrations.append((func, args, kwargs))
             return func
 
         return decorator

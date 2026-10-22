@@ -351,6 +351,10 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
         Молчание здесь хуже подсказки: пользователь не понимает, что бот
         ждёт кнопку, и пишет ещё текст. Пока идёт платный прогон, на любое
         сообщение отвечаем одинаково: идёт генерация, второй раз не запускаем.
+
+        Состояния нет после перезапуска бота (FSM живёт в памяти): в этом
+        случае сообщение не должно проваливаться в «Проигнорировано», поэтому
+        диалог начинается заново с приветствия — как на `/start`.
         """
 
         if runs.is_running(_extract_user_id(event)):
@@ -358,6 +362,9 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
             return
 
         state = await context.get_state()
+        if state is None:
+            await _send_greeting(event.message.answer, context)
+            return
         if state == StoryFlow.waiting_age:
             await _reply(
                 event.message.answer,
@@ -601,12 +608,12 @@ def register_handlers(dp: Any, services: BotServices) -> Handlers:
     dp.message_created(
         StoryFlow.waiting_photo, F.message.body.attachments
     )(on_photo)
-    dp.message_created(
-        StoryFlow.waiting_photo,
-        StoryFlow.waiting_age,
-        StoryFlow.waiting_moral,
-        StoryFlow.waiting_voice,
-    )(on_other_message)
+    # Ловушка для остальных сообщений. Регистрируется последней: dispatcher
+    # выполняет первый подходящий обработчик, поэтому `/start` и приём фото
+    # выигрывают у неё. Фильтра по состоянию у неё нет намеренно — иначе
+    # сообщение в пустом состоянии (после перезапуска бота) снова уходило бы
+    # в «Проигнорировано», а пользователь видел бы молчащего бота.
+    dp.message_created()(on_other_message)
     dp.message_callback()(on_callback)
 
     return Handlers(
