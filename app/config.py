@@ -26,6 +26,22 @@ class Settings(BaseSettings):
         ...,
         description="Токен бота MAX. Единственное обязательное значение.",
     )
+    max_upload_attempts: int = Field(
+        default=30,
+        gt=0,
+        description=(
+            "Сколько раз пытаться отправить сообщение с вложением, пока MAX "
+            "не закончит его обработку (ответ attachment.not.ready)."
+        ),
+    )
+    max_upload_retry_delay: float = Field(
+        default=3.0,
+        gt=0,
+        description=(
+            "Пауза между попытками отправки вложения в секундах. Вместе с "
+            "числом попыток задаёт бюджет ожидания готовности медиа."
+        ),
+    )
 
     # --- DeepSeek (генерация сказки) -----------------------------------
     deepseek_api_key: str = Field(

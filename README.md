@@ -369,6 +369,8 @@ cp .env.example .env
 | Переменная | Назначение | По умолчанию |
 | --- | --- | --- |
 | `MAX_BOT_TOKEN` | Токен бота MAX (обязательно) | — |
+| `MAX_UPLOAD_ATTEMPTS` | Попыток отправки вложения, пока MAX его обрабатывает | `30` |
+| `MAX_UPLOAD_RETRY_DELAY` | Пауза между попытками отправки вложения, с | `3` |
 | `DEEPSEEK_API_KEY` | Ключ DeepSeek | пусто |
 | `DEEPSEEK_BASE_URL` | Базовый URL OpenAI-совместимого API DeepSeek | `https://api.deepseek.com` |
 | `DEEPSEEK_MODEL` | Модель сказки | `deepseek-flash` |

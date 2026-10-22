@@ -57,6 +57,13 @@ async def main() -> int:
         # диалога get_chat_by_id отвечает chat.not.found и роняет батч
         # обновлений. Обработчики берут нужные поля из payload события.
         auto_requests=False,
+        # MAX обрабатывает вложения асинхронно и до готовности отвечает
+        # attachment.not.ready. Штатных 5 попыток по 2 с не хватало свежему
+        # mp3 на 2,5 МБ: по живым замерам обработка занимала 13–20 с, и
+        # озвучка терялась. Бюджет задаётся настройками, по умолчанию 30 × 3 с
+        # ≈ 90 с с запасом на длинные сказки.
+        after_upload_attempts=settings.max_upload_attempts,
+        after_upload_retry_delay=settings.max_upload_retry_delay,
     )
     dispatcher = Dispatcher()
 

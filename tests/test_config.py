@@ -156,3 +156,59 @@ def test_both_settings_classes_load_without_api_keys(
     assert bot_settings.deepseek_api_key == ""
     assert story_settings.routerai_api_key == ""
     assert story_settings.story_image_aspect_ratio == "4:3"
+
+
+# --- Бюджет ожидания готовности медиа в MAX -----------------------------
+
+
+def test_max_upload_retry_budget_is_long_enough_for_fresh_mp3(
+    monkeypatch,
+) -> None:
+    """Бюджет ожидания готовности медиа перекрывает обработку mp3 в MAX.
+
+    Живой прогон: свежий mp3 на 2,5 МБ / 5 минут получил токен загрузки, но
+    MAX не успел его обработать за штатные 5 попыток по 2 с, и озвучка не
+    дошла до пользователя. Обработка заняла около 12 с, поэтому суммарное
+    ожидание должно быть заметно больше с запасом на тяжёлые файлы.
+    """
+
+    for name in ("MAX_UPLOAD_ATTEMPTS", "MAX_UPLOAD_RETRY_DELAY"):
+        monkeypatch.delenv(name, raising=False)
+
+    config = _bot_settings()
+
+    assert config.max_upload_attempts >= 15
+    assert config.max_upload_retry_delay >= 2.0
+    assert (
+        config.max_upload_attempts * config.max_upload_retry_delay
+        >= 60.0
+    )
+
+
+def test_max_upload_retry_values_are_validated(monkeypatch) -> None:
+    """Ноль попыток или нулевая задержка отклоняются при загрузке."""
+
+    monkeypatch.setenv("MAX_BOT_TOKEN", "token-123")
+    monkeypatch.setenv("MAX_UPLOAD_ATTEMPTS", "0")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+    monkeypatch.setenv("MAX_UPLOAD_ATTEMPTS", "20")
+    monkeypatch.setenv("MAX_UPLOAD_RETRY_DELAY", "0")
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_max_upload_retry_env_overrides_defaults(monkeypatch) -> None:
+    """Значения бюджета ожидания читаются из окружения."""
+
+    monkeypatch.setenv("MAX_BOT_TOKEN", "token-123")
+    monkeypatch.setenv("MAX_UPLOAD_ATTEMPTS", "45")
+    monkeypatch.setenv("MAX_UPLOAD_RETRY_DELAY", "1.5")
+
+    config = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert config.max_upload_attempts == 45
+    assert config.max_upload_retry_delay == 1.5

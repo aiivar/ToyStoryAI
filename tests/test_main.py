@@ -184,3 +184,31 @@ def test_module_entrypoint_starts_and_stops() -> None:
     assert completed.returncode == 1
     assert "Неверный MAX_BOT_TOKEN" in output
     db_path.unlink(missing_ok=True)
+
+
+async def test_main_passes_upload_retry_budget_to_bot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Бюджет ожидания готовности медиа передаётся в `Bot`.
+
+    MAX обрабатывает mp3 асинхронно и отвечает `attachment.not.ready`;
+    штатных пяти попыток по 2 с не хватает свежему файлу на несколько
+    мегабайт, поэтому бюджет задаётся настройками и обязан доехать до бота.
+    """
+
+    TMP_ROOT.mkdir(parents=True, exist_ok=True)
+    db_path = TMP_ROOT / f"cli-{uuid4().hex}.db"
+    monkeypatch.setenv("MAX_BOT_TOKEN", "invalid-token")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    monkeypatch.setenv("UPLOADS_DIR", str(TMP_ROOT / "cli-uploads"))
+    monkeypatch.setenv("MAX_UPLOAD_ATTEMPTS", "30")
+    monkeypatch.setenv("MAX_UPLOAD_RETRY_DELAY", "3")
+    monkeypatch.setattr(main_module, "Bot", _RecordingBot)
+    monkeypatch.setattr(main_module, "Dispatcher", _FailingDispatcher)
+
+    code = await main_module.main()
+
+    assert code == 1
+    assert _RecordingBot.last_kwargs["after_upload_attempts"] == 30
+    assert _RecordingBot.last_kwargs["after_upload_retry_delay"] == 3.0
+    db_path.unlink(missing_ok=True)
